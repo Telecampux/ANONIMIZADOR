@@ -79,3 +79,6 @@ def update_direct(destination: Path) -> None:
             for relative in created:
                 (destination / relative).unlink(missing_ok=True)
             raise
+    old_updater = destination / "Actualizador"
+    if old_updater.is_dir() and not old_updater.is_symlink():
+        shutil.rmtree(old_updater)
