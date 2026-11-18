@@ -1,9 +1,9 @@
 @echo off
 cd /d "%~dp0"
 if exist "%~dp0.venv\Scripts\python.exe" (
-  "%~dp0.venv\Scripts\python.exe" "%~dp0Actualizador\actualizar.py" --direct "%~dp0"
+  "%~dp0.venv\Scripts\python.exe" "%~dp0Actualizador\actualizar.py" --direct "%~dp0."
 ) else (
-  py -3 "%~dp0Actualizador\actualizar.py" --direct "%~dp0"
+  py -3 "%~dp0Actualizador\actualizar.py" --direct "%~dp0."
 )
 if errorlevel 1 (
   echo.
