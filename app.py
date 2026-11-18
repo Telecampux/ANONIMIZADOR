@@ -228,15 +228,16 @@ class App(tk.Tk):
         if self.busy:
             messagebox.showinfo('Actualización', 'Espere a que termine el proceso actual.')
             return
-        launcher = Path(__file__).resolve().parent / 'Actualizar.bat'
-        if not launcher.is_file():
-            messagebox.showerror('Actualización', f'No se encuentra {launcher.name} en la carpeta del programa.')
-            return
+        self.status.set('Descargando e instalando la nueva versión desde GitHub…')
+        self.update_idletasks()
         try:
-            os.startfile(str(launcher))
-        except OSError as error:
+            from actualizacion import update_direct
+            update_direct(Path(__file__).resolve().parent)
+        except Exception as error:
             messagebox.showerror('Actualización', str(error))
+            self.status.set('No se pudo completar la actualización.')
             return
+        messagebox.showinfo('Actualización', 'Nueva versión instalada. Abra de nuevo el Anonimizador.')
         self.destroy()
 
     def cancel_processing(self):
