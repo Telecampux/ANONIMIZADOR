@@ -230,14 +230,14 @@ class App(tk.Tk):
         if self.busy:
             messagebox.showinfo('Actualización', 'Espere a que termine el proceso actual.')
             return
-        self.status.set('Descargando e instalando la nueva versión desde GitHub…')
+        self.status.set('Comprobando si hay una nueva versión…')
         self.update_idletasks()
         try:
             installed = update_direct(
                 Path(__file__).resolve().parent,
                 confirm=lambda current, available: messagebox.askyesno(
                     'Instalar nueva versión',
-                    f'Versión instalada: {current}\nVersión en GitHub: {available}\n\n¿Desea instalarla?'))
+                    f'Versión instalada: {current}\nVersión disponible: {available}\n\n¿Desea instalarla?'))
         except Exception as error:
             messagebox.showerror('Actualización', str(error))
             self.status.set('No se pudo completar la actualización.')
