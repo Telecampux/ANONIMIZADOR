@@ -1,910 +1,639 @@
+"""Interfaz local en español; los documentos nunca se suben a internet."""
 import os
-import json
-import queue
-import threading
-import uuid
-import shutil
 from pathlib import Path
+import queue
+import re
+import shutil
+import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
-from motor import FORMATOS, IMAGENES, PATRONES, procesar
-from vista_previa import Comparador, CopiasPreparadas, plan_configuracion
-from estilo import configurar_casillas
-from selector_archivos import SelectorArchivos
-from lista_archivos import ListaArchivos
-from reversible import Caso, restaurar_archivo
-from lector_fallo import LectorFallo
-from formatos_documentos import filtros_documentos
-from office_antiguo import FORMATOS_ANTIGUOS
-from dialogo_caso import pedir_nombre_caso
+from tkinter import filedialog, messagebox, ttk
 
-CARPETA_ORIGEN = Path('C:/TUTELAS/DEMANDA')
-CARPETA_DESTINO = Path('C:/TUTELAS/demanda anonima')
+from anonimizador import analyze, apply_review, read_recovery, restore
+from restauracion_campos import restore_judgment
+from revision import ReviewWindow
+from estilo import configurar_estilos
+from estilo_casillas import configurar_casillas
+from procesamiento import ProcessingCancelled, cancellation_scope, check_cancelled
 
 
-class Anonimizador(tk.Tk):
+ORIGINALS_FOLDER = Path(r'C:\TUTELAS\ORIGINALES')
+RESTORATION_FOLDER = Path(r'C:\TUTELAS\ANONIMIZADOS')
+
+
+class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Anonimizador — seleccionar y anonimizar')
-        icono = Path(__file__).resolve().parent / 'anonimizador.ico'
-        if icono.exists():
-            self.iconbitmap(str(icono))
-        # Arranca maximizada respetando el área de trabajo y la barra de tareas.
-        ancho = min(1000, max(360, self.winfo_screenwidth() - 80))
-        alto = min(860, max(400, self.winfo_screenheight() - 100))
-        self.geometry(f'{ancho}x{alto}')
-        self.minsize(760, 560)
-        self.state('zoomed')
-        self.configure(bg='#eef2f7')
-        style = ttk.Style(self)
-        style.theme_use('clam')
+        configurar_estilos(self)
         configurar_casillas(self)
-        style.configure('TFrame', background='#eef2f7')
-        style.configure('TLabel', background='#eef2f7', font=('Segoe UI', 10))
-        style.configure('TButton', font=('Segoe UI', 10), padding=7)
-        style.configure('Accion.TButton', font=('Segoe UI', 12, 'bold'), padding=(18, 10), background='#087f6d', foreground='white')
-        style.map('Accion.TButton', background=[('disabled', '#d8e2e8'), ('active', '#065f52')], foreground=[('disabled', '#64748b')])
-        style.configure('Reanonimizar.TButton', font=('Segoe UI', 12, 'bold'),
-                        padding=(20, 12), background='#facc15', foreground='#422006',
-                        bordercolor='#a16207')
-        style.map('Reanonimizar.TButton',
-                  background=[('disabled', '#e2e8f0'), ('pressed', '#eab308'), ('active', '#fde047')],
-                  foreground=[('disabled', '#64748b')])
-        for nombre, fondo in (('AnalizandoClaro.TButton', '#fff3c4'), ('AnalizandoIntenso.TButton', '#facc15')):
-            style.configure(nombre, background=fondo, foreground='#713f12', font=('Segoe UI', 10, 'bold'))
-            style.map(nombre, background=[('disabled', fondo)], foreground=[('disabled', '#713f12')])
-        self.origen = tk.StringVar(value=str(CARPETA_ORIGEN))
-        self.destino = tk.StringVar(value=str(CARPETA_DESTINO))
-        self.eventos = queue.Queue()
-        self.archivos = []
-        self.configuraciones = {}
-        self.activo = None
-        self.cambiando = False
-        self.generacion = 0
-        self.analizando = False
-        self._parpadeo = None
-        self._fase_aviso = False
-        self.caso = None
-        self.preparadas = CopiasPreparadas()
-        self.vista_guardado = None
-        self.ultima_copia = None
-        root = ttk.Frame(self, padding=16)
-        root.pack(fill='both', expand=True)
-        root.columnconfigure(0, weight=1)
-        root.rowconfigure(2, weight=1)
-        cabecera = ttk.Frame(root)
-        cabecera.grid(row=0, column=0, sticky='ew')
-        self.nombre_caso = tk.StringVar(value='Crea o abre un caso para comenzar')
-        ttk.Label(cabecera, textvariable=self.nombre_caso, font=('Segoe UI', 12, 'bold')).pack(anchor='w')
-        herramientas = ttk.Frame(cabecera)
-        herramientas.pack(fill='x')
-        ttk.Button(herramientas, text='Nuevo caso', command=self.nuevo_caso).pack(side='left')
-        ttk.Button(herramientas, text='Abrir caso local', command=self.abrir_caso).pack(side='left', padx=4)
-        ttk.Button(herramientas, text='Ver tabla local', command=self.ver_caso).pack(side='left', padx=4)
-        ttk.Button(herramientas, text='Restaurar fallo', command=self.restaurar_fallo).pack(side='left', padx=4)
-        ttk.Button(herramientas, text='Leer fallo restaurado', command=self.leer_fallo_restaurado).pack(side='left', padx=4)
-        destino = ttk.Frame(root)
-        destino.grid(row=1, column=0, sticky='ew', pady=(8, 12))
-        destino.columnconfigure(1, weight=1)
-        ttk.Label(destino, text='Guardar en:').grid(row=0, column=0, padx=(0, 8))
-        ttk.Entry(destino, textvariable=self.destino, state='readonly').grid(row=0, column=1, sticky='ew')
-        ttk.Button(destino, text='Cambiar destino', command=self.elegir_destino).grid(row=0, column=2, padx=(8, 0))
-        ttk.Button(destino, text='Ver archivos guardados', command=self.abrir_destino).grid(row=0, column=3, padx=(8, 0))
-        self.pestanas = ttk.Notebook(root)
-        self.pestanas.grid(row=2, column=0, sticky='nsew')
-        paneles = ttk.Frame(self.pestanas)
-        self.pestanas.add(paneles, text='Anonimizar documentos')
-        self.lector_fallo = LectorFallo(self.pestanas, lambda: self.destino.get())
-        self.pestanas.add(self.lector_fallo, text='Leer fallo restaurado')
-        paneles.columnconfigure(0, weight=1, uniform='panel')
-        paneles.columnconfigure(1, weight=1, uniform='panel')
-        paneles.rowconfigure(0, weight=1)
-        izquierda = ttk.Frame(paneles, padding=(0, 0, 12, 0))
-        izquierda.grid(row=0, column=0, sticky='nsew')
-        izquierda.columnconfigure(0, weight=1)
-        izquierda.rowconfigure(4, weight=1)
-        ttk.Label(izquierda, text='1. Archivos', font=('Segoe UI', 13, 'bold')).grid(row=0, column=0, sticky='w')
-        self.etiqueta_caso_izquierda = ttk.Label(
-            izquierda, textvariable=self.nombre_caso, font=('Segoe UI', 11, 'bold'),
-            foreground='#087f6d', wraplength=280)
-        self.etiqueta_caso_izquierda.grid(row=2, column=0, sticky='ew', pady=(6, 0))
-        acciones = ttk.Frame(izquierda)
-        acciones.grid(row=1, column=0, sticky='ew', pady=6)
-        self.boton_cargar = ttk.Button(acciones, text='Demanda y anexos de la tutela…', command=self.elegir_archivos, state='disabled')
-        self.boton_cargar.pack(side='left')
-        self.subcarpetas = tk.BooleanVar(value=False)
-        self.archivo_elegido = tk.BooleanVar(value=False)
-        self.conteo = tk.StringVar(value='Primero crea un nuevo caso o abre uno guardado.')
-        contador = ttk.Label(izquierda, textvariable=self.conteo, wraplength=280)
-        contador.grid(row=3, column=0, sticky='ew', pady=5)
-        area = ttk.Frame(izquierda)
-        area.grid(row=4, column=0, sticky='nsew')
-        self.lista = ListaArchivos(area)
-        self.lista.bind('<<ListboxSelect>>', self.cambiar_archivo)
-        scroll = ttk.Scrollbar(area, orient='vertical', command=self.lista.yview)
-        self.lista.configure(yscrollcommand=scroll.set)
-        scroll.pack(side='right', fill='y')
-        self.lista.pack(side='left', fill='both', expand=True)
-        formatos = ttk.Label(izquierda, wraplength=280, text='Marca la casilla delante del archivo y pulsa Iniciar cuando quieras. Después elige los datos que deseas ocultar.')
-        formatos.grid(row=5, column=0, sticky='ew', pady=(6, 0))
-        derecha = ttk.Frame(paneles, padding=(12, 0, 0, 0))
-        derecha.grid(row=0, column=1, sticky='nsew')
-        derecha.columnconfigure(0, weight=1)
-        derecha.rowconfigure(2, weight=1)
-        self.titulo_campos = tk.StringVar(value='2. Selecciona un archivo para ver sus campos')
-        cabecera_campos = ttk.Frame(derecha)
-        cabecera_campos.grid(row=0, column=0, sticky='ew', pady=(0, 6))
-        cabecera_campos.columnconfigure(0, weight=1)
-        titulo_campos = ttk.Label(cabecera_campos, textvariable=self.titulo_campos, font=('Segoe UI', 12, 'bold'), wraplength=120)
-        titulo_campos.grid(row=0, column=0, sticky='w')
-        self.boton_analizar = ttk.Button(cabecera_campos, text='Iniciar anonimización', command=self.iniciar_archivo, state='disabled')
-        self.boton_analizar.grid(row=0, column=1, sticky='e', padx=(8, 0))
-        self.boton_vista = ttk.Button(cabecera_campos, text='3. Anonimizar campos seleccionados', command=self.anonimizar_campos, style='Accion.TButton', state='disabled')
-        self.boton_vista.grid(row=1, column=0, columnspan=2, sticky='e', pady=(8, 0))
-        self.boton_reanonimizar = ttk.Button(cabecera_campos, text='Volver a anonimizar', style='Reanonimizar.TButton', command=self.volver_anonimizar)
-        self.boton_reanonimizar.grid(row=2, column=0, columnspan=2, sticky='e', pady=(8, 0))
-        self.boton_reanonimizar.grid_remove()
-        cabecera_campos.bind('<Configure>', lambda e: titulo_campos.configure(wraplength=max(80, e.width - self.boton_analizar.winfo_reqwidth() - 8)))
-        self.datos_variables = {}
-        self.casillas_datos = []
-        self.etiquetas = {
-            'Nombres propios de personas (detección en español)': 'Nombres de personas',
-            'Correos electrónicos': 'Correos electrónicos',
-            'Documentos con etiqueta CC, TI, CE o NIT': 'Identificaciones'}
-        self.resumen_campos = tk.StringVar(value='Los campos detectados aparecerán aquí al cargar los archivos.')
-        nota = ttk.Label(derecha, textvariable=self.resumen_campos, wraplength=280)
-        self.aviso_analisis = nota
-        nota.grid(row=1, column=0, sticky='ew', pady=(5, 10))
-        area_datos = ttk.Frame(derecha)
-        area_datos.grid(row=2, column=0, sticky='nsew')
-        lista_datos = ttk.Frame(area_datos)
-        lista_datos.pack(fill='both', expand=True)
-        self.lienzo_datos = tk.Canvas(lista_datos, bg='#eef2f7', highlightthickness=0)
-        scroll_datos = ttk.Scrollbar(lista_datos, orient='vertical', command=self.lienzo_datos.yview)
-        self.lienzo_datos.configure(yscrollcommand=scroll_datos.set)
-        scroll_datos.pack(side='right', fill='y')
-        self.lienzo_datos.pack(side='left', fill='both', expand=True)
-        self.panel_datos = ttk.Frame(self.lienzo_datos)
-        self.ventana_datos = self.lienzo_datos.create_window(0, 0, window=self.panel_datos, anchor='nw')
-        self.panel_datos.bind('<Configure>', lambda e: self.lienzo_datos.configure(scrollregion=self.lienzo_datos.bbox('all')))
-        self.lienzo_datos.bind('<Configure>', self.ajustar_datos)
-        aviso = ttk.Label(derecha, wraplength=280, foreground='#7b4b14', text='Marca solo los datos que quieras ocultar. Deja desmarcadas las detecciones incorrectas. La copia para el skill es Word con códigos. En escaneos se usa OCR: revisa todo el texto antes de guardar.')
-        aviso.grid(row=3, column=0, sticky='ew', pady=(8, 0))
-        # Ajusta las l?neas al ancho real de cada panel.
-        def ajustar_textos(event):
-            ancho = max(120, event.width - 24)
-            for label in (nota, aviso):
-                label.configure(wraplength=ancho)
-        derecha.bind('<Configure>', ajustar_textos)
-        izquierda.bind('<Configure>', lambda e: [label.configure(wraplength=max(120, e.width - 12)) for label in (contador, formatos, self.etiqueta_caso_izquierda)])
-        pie = ttk.Frame(root)
-        pie.grid(row=3, column=0, sticky='ew', pady=(12, 0))
-        pie.columnconfigure(0, weight=1)
-        self.boton = ttk.Button(pie, text='Crear copias anonimizadas', command=self.iniciar)
-        self.progreso = ttk.Progressbar(pie)
-        self.progreso.grid(row=0, column=0, columnspan=2, sticky='ew')
-        self.estado = tk.StringVar(value='Procesamiento local. Los originales se conservan.')
-        estado_label = ttk.Label(pie, textvariable=self.estado, wraplength=600)
-        estado_label.grid(row=1, column=0, columnspan=3, sticky='ew', pady=5)
-        pie.bind('<Configure>', lambda e: estado_label.configure(wraplength=max(120, e.width)))
-        self.cargar_destino()
-        self.mostrar_campos()
-        self._poll = self.after(150, self.recibir)
+        self.title('Anonimizador · Revisión y autorización · 2026.11.17.7')
+        icon = Path(__file__).resolve().parent / 'assets' / 'anonimizador.ico'
+        if icon.is_file():
+            self.iconbitmap(str(icon))
+        self.geometry('860x760')
+        self.minsize(720, 660)
+        self.state('zoomed')
+        self.files = []
+        self.events = queue.Queue()
+        self.busy = False
+        self.cancel_event = threading.Event()
+        self.progress_page = None
+        self.active_filename = ''
+        self.restored_file = ''
+        self.selected_restored = tk.StringVar()
+        self.output = tk.StringVar(value=str(Path(__file__).resolve().parent.parent / 'ANONIMIZADOS'))
+        self.auto = tk.BooleanVar(value=True)
+        self.mode = tk.StringVar(value='anonimizar')
+        self.recovery = tk.StringVar()
+        self.judgment = tk.StringVar()
+        self.judgment_name = tk.StringVar(value='Seleccione el archivo que desea restaurar')
+        self.recovery_name = tk.StringVar(value='Ninguna tabla cargada')
+        self.anonymized_source = tk.StringVar(value='Insumo anonimizado asociado: sin cargar')
+        self.status = tk.StringVar(value='Seleccione archivos, analice las propuestas y autorice cuáles aplicar.')
+        frame = ttk.Frame(self, padding=22)
+        frame.pack(fill='both', expand=True)
+        ttk.Label(frame, text='Anonimizador reversible', font=('Segoe UI', 22, 'bold')).pack(anchor='w')
+        ttk.Label(frame, text='OCR local en español e inglés · Originales intactos · Restauración de archivos anonimizados').pack(anchor='w', pady=(3, 15))
+        modes = ttk.Frame(frame)
+        modes.pack(fill='x')
+        for value, label in [('anonimizar', 'Anonimizar archivos'), ('fallo', 'Restaurar archivos anonimizados')]:
+            ttk.Radiobutton(modes, text=label, variable=self.mode, value=value).pack(side='left', padx=(0, 24))
+        document_area = ttk.Frame(frame)
+        document_area.pack(fill='x')
+        self.input_frame = ttk.Frame(document_area)
+        self.input_frame.pack(fill='x')
+        bar = ttk.Frame(self.input_frame)
+        bar.pack(fill='x', pady=(15, 5))
+        ttk.Button(bar, text='Seleccionar archivos…', command=self.choose).pack(side='left')
+        ttk.Button(bar, text='Limpiar selección', command=self.clear).pack(side='left', padx=8)
+        self.listing = tk.Listbox(self.input_frame, height=5)
+        self.listing.pack(fill='x')
+        self.judgment_frame = ttk.LabelFrame(document_area, text='1. Archivo anonimizado', padding=10)
+        ttk.Label(self.judgment_frame, text='Archivo anonimizado por esta aplicación cuyos datos originales desea restaurar.', wraplength=700).pack(anchor='w')
+        judgment_buttons = ttk.Frame(self.judgment_frame)
+        judgment_buttons.pack(fill='x')
+        ttk.Button(judgment_buttons, text='Cargar archivo…', command=self.choose_judgment).pack(side='left')
+        ttk.Label(self.judgment_frame, textvariable=self.judgment_name, font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(5, 0))
+        self.judgment_path = ttk.Entry(self.judgment_frame, textvariable=self.judgment, state='readonly')
+        recovery_bar = self.recovery_bar = ttk.LabelFrame(document_area, text='Recuperación identificada automáticamente', padding=10)
+        recovery_bar.pack(fill='x', pady=5)
+        ttk.Label(recovery_bar, text='La aplicación identifica los datos originales al cargar el archivo anonimizado.', wraplength=700).pack(anchor='w')
+        recovery_buttons = ttk.Frame(recovery_bar)
+        recovery_buttons.pack(fill='x', pady=4)
+        ttk.Label(recovery_bar, textvariable=self.recovery_name, font=('Segoe UI', 10, 'bold')).pack(anchor='w')
+        self.recovery_path = ttk.Entry(recovery_bar, textvariable=self.recovery, state='readonly')
+        self.recovery_path.pack(fill='x', pady=3)
+        ttk.Label(recovery_bar, textvariable=self.anonymized_source, wraplength=700).pack(anchor='w')
+        self.recovery_info = tk.StringVar(value='Cargue la tabla .restauracion del caso para ver sus campos.')
+        ttk.Label(recovery_bar, textvariable=self.recovery_info, wraplength=700).pack(anchor='w')
+        fields_frame = ttk.Frame(recovery_bar)
+        fields_frame.pack(fill='x', pady=(5, 0))
+        self.recovery_fields = ttk.Treeview(fields_frame, columns=('code', 'value'), show='headings', height=4)
+        self.recovery_fields.heading('code', text='Campo anonimizado')
+        self.recovery_fields.heading('value', text='Dato original que se restaurará')
+        self.recovery_fields.column('code', width=320)
+        self.recovery_fields.column('value', width=360)
+        fields_scroll = ttk.Scrollbar(fields_frame, orient='vertical', command=self.recovery_fields.yview)
+        self.recovery_fields.configure(yscrollcommand=fields_scroll.set)
+        fields_scroll.pack(side='right', fill='y')
+        self.recovery_fields.pack(fill='x', expand=True)
+        self.manual_frame = ttk.Frame(frame)
+        self.manual_frame.pack(fill='x')
+        ttk.Label(self.manual_frame, text='Nombres de personas o identificaciones adicionales: uno por línea.').pack(anchor='w', pady=(14, 4))
+        self.manual = tk.Text(self.manual_frame, height=5, wrap='word', font=('Segoe UI', 10))
+        self.manual.pack(fill='x')
+        ttk.Checkbutton(self.manual_frame, text='Detectar solo nombres propios de personas e identificaciones',
+                        variable=self.auto, command=self.actualizar_aviso_deteccion).pack(anchor='w', pady=6)
+        self.aviso_deteccion = tk.StringVar()
+        ttk.Label(self.manual_frame, textvariable=self.aviso_deteccion, foreground='#9a3412',
+                  wraplength=790).pack(anchor='w')
+        self.manual.bind('<KeyRelease>', self.actualizar_aviso_deteccion)
+        self.actualizar_aviso_deteccion()
+        grid = self.output_grid = ttk.Frame(frame)
+        grid.pack(fill='x', pady=8)
+        grid.columnconfigure(1, weight=1)
+        ttk.Label(grid, text='Carpeta de salida').grid(row=0, column=0, sticky='w', padx=(0, 12), pady=4)
+        ttk.Entry(grid, textvariable=self.output).grid(row=0, column=1, sticky='ew', pady=4)
+        ttk.Button(grid, text='Elegir…', command=self.choose_output).grid(row=0, column=2, padx=(8, 0))
+        self.mode_hint = tk.StringVar()
+        ttk.Label(frame, textvariable=self.mode_hint, wraplength=790, foreground='#794500').pack(anchor='w', pady=8)
+        actions = ttk.Frame(frame)
+        actions.pack(fill='x', pady=5)
+        self.run_button = ttk.Button(actions, text='Anonimizar', command=self.run, style='Proceso.TButton')
+        self.run_button.pack(side='left')
+        self.cancel_button = ttk.Button(actions, text='Cancelar anonimización', command=self.cancel_processing, state='disabled')
+        self.cancel_button.pack(side='left', padx=8)
+        self.folder_button = ttk.Button(actions, text='Abrir carpeta anonimizados', command=self.open_output)
+        self.folder_button.pack(side='left', padx=8)
+        self.activity = ttk.Progressbar(actions, mode='indeterminate', length=150,
+                                        style='Proceso.Horizontal.TProgressbar')
+        self.activity.pack(side='right', padx=8)
+        ttk.Label(frame, textvariable=self.status, wraplength=790).pack(anchor='w', pady=6)
+        results = self.results_frame = ttk.LabelFrame(frame, text='2. Archivo restaurado', padding=10)
+        self.result_name = tk.StringVar(value='')
+        ttk.Label(results, textvariable=self.result_name, wraplength=700).pack(anchor='w', pady=(0, 5))
+        result_actions = ttk.Frame(results)
+        result_actions.pack(fill='x')
+        self.open_result_button = ttk.Button(result_actions, text='Abrir', command=self.open_restored, state='disabled')
+        self.open_result_button.pack(side='left', padx=8)
+        self.download_result_button = ttk.Button(result_actions, text='Descargar como…', command=self.download_restored, state='disabled')
+        self.download_result_button.pack(side='left')
+        self.selected_restored.trace_add('write', self.update_result_controls)
+        self.log = tk.Text(frame, height=6, state='disabled', wrap='word')
+        self.log.tag_configure('pagina', font=('Segoe UI', 11, 'bold'))
+        self.log.pack(fill='both', expand=True)
+        self.mode.trace_add('write', self.update_mode)
+        self.update_mode()
+        self.protocol('WM_DELETE_WINDOW', self.close)
+        self.after(150, self.poll)
 
-    def leer_fallo_restaurado(self):
-        self.pestanas.select(self.lector_fallo)
-        self.lector_fallo.elegir()
+    def actualizar_aviso_deteccion(self, event=None):
+        if self.auto.get():
+            self.aviso_deteccion.set('')
+        elif self.manual.get('1.0', 'end').strip():
+            self.aviso_deteccion.set('Al desactivar esta opción, no se anonimizan nombres ni identificaciones automáticamente. Solo se anonimizan los datos que haya incluido manualmente en el campo de arriba.')
+        else:
+            self.aviso_deteccion.set('Al desactivar esta opción, no se anonimizan nombres ni identificaciones automáticamente. Solo se anonimizan los datos que incluya manualmente en el campo de arriba. Si lo deja en blanco, no se anonimiza nada.')
 
-    def asignar_caso(self, caso):
-        if self.analizando or str(self.boton.cget('state')) == 'disabled':
-            return
-        # Una comparación abierta pertenece al caso con que fue preparada.
-        for ventana in self.winfo_children():
-            if ventana.__class__.__name__ == 'Comparador':
-                ventana.destroy()
-        self.preparadas.cerrar()
-        self.caso = caso
-        self.boton_cargar.configure(state='normal')
-        self.conteo.set('Caso listo. Ya puedes cargar la demanda y sus anexos.')
-        self.preparadas = CopiasPreparadas(caso)
-        self.actualizar_estado_caso()
-        self.estado.set('Caso guardado localmente. La tabla privada se conserva en este computador.')
-        self.actualizar_accion()
+    def update_result_controls(self, *_):
+        selected = self.selected_restored.get()
+        self.result_name.set(Path(selected).name if selected else '')
+        if selected and Path(selected).is_file() and self.mode.get() == 'fallo':
+            self.results_frame.pack(fill='x', pady=5)
+        else:
+            self.results_frame.pack_forget()
+        state = 'normal' if selected and Path(selected).is_file() else 'disabled'
+        self.open_result_button.config(state=state)
+        self.download_result_button.config(state=state)
 
-    def actualizar_estado_caso(self):
-        if self.caso:
-            self.nombre_caso.set(f'Caso: {self.caso.nombre} · {self.caso.estado_anonimizacion}')
+    def restored_selection(self):
+        path = Path(self.selected_restored.get()) if self.selected_restored.get() else None
+        if path is None or not path.is_file():
+            messagebox.showinfo('Archivo restaurado', 'Seleccione primero un archivo restaurado.')
+            return None
+        return path
 
-    def nuevo_caso(self, recargar=True):
-        if self.analizando or str(self.boton.cget('state')) == 'disabled':
-            return
-        nombre = pedir_nombre_caso(self)
-        if nombre is None:
-            return
-        if not nombre.strip():
-            messagebox.showinfo('Nombre del caso', 'Escribe un nombre para reconocer el caso.', parent=self)
-            return
-        self.asignar_caso(Caso(nombre=nombre))
-        if recargar and self.archivos:
-            self.cargar_archivos(list(self.archivos))
-
-    def abrir_caso(self):
-        if self.analizando or str(self.boton.cget('state')) == 'disabled':
-            return
-        carpeta = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'Anonimizador' / 'casos'
-        ventana = tk.Toplevel(self)
-        ventana.title('Abrir caso local')
-        ventana.geometry('900x380')
-        ventana.transient(self)
-        marco = ttk.Frame(ventana, padding=16)
-        marco.pack(fill='both', expand=True)
-        ttk.Label(marco, text='Elige el caso que quieres continuar:').pack(anchor='w', pady=(0, 8))
-        lista = ttk.Treeview(marco, columns=('nombre', 'fecha', 'estado'), show='headings', selectmode='browse')
-        lista.heading('nombre', text='Nombre del caso')
-        lista.heading('fecha', text='Fecha de creación')
-        lista.heading('estado', text='Estado')
-        lista.column('nombre', width=360)
-        lista.column('fecha', width=160)
-        lista.column('estado', width=280)
-        lista.pack(fill='both', expand=True)
-        casos = {}
-        omitidos = 0
-        for ruta in sorted(carpeta.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
+    def open_restored(self):
+        path = self.restored_selection()
+        if path is not None:
             try:
-                caso = Caso(ruta)
-                fila = lista.insert('', 'end', values=(caso.nombre, caso.fecha, caso.estado_anonimizacion))
-                casos[fila] = caso
-            except (OSError, ValueError, KeyError, TypeError):
-                omitidos += 1
-        aviso_vacio = ttk.Label(marco, text='No hay casos guardados disponibles.')
-        if not casos:
-            aviso_vacio.pack(anchor='w', pady=8)
-        if omitidos:
-            ttk.Label(marco, text=f'No se pudieron leer {omitidos} tablas locales.').pack(anchor='w')
+                os.startfile(str(path.resolve()))
+            except OSError as exc:
+                messagebox.showerror('Abrir archivo', str(exc))
 
-        def elegir(event=None):
-            seleccion = lista.selection()
-            if not seleccion:
-                return
-            self.asignar_caso(casos[seleccion[0]])
-            archivos = self.caso.datos.get('archivos_caso', [])
-            if not archivos:
-                archivos = list(dict.fromkeys(f for fuentes in self.caso.datos.get('archivos', {}).values() for f in fuentes))
-            if archivos:
-                self.cargar_archivos(archivos)
-            elif self.archivos:
-                self.cargar_archivos(list(self.archivos))
-            ventana.destroy()
-
-        def eliminar():
-            seleccion = lista.selection()
-            if not seleccion:
-                messagebox.showinfo('Eliminar caso', 'Selecciona el caso que quieres eliminar.', parent=ventana)
-                return
-            fila = seleccion[0]
-            caso = casos[fila]
-            try:
-                copias = caso.copias_para_eliminar([self.destino.get(), CARPETA_DESTINO])
-            except (OSError, ValueError) as exc:
-                messagebox.showerror('No se eliminó el caso', str(exc), parent=ventana)
-                return
-            if not messagebox.askyesno(
-                'Eliminar caso',
-                f'¿Eliminar «{caso.nombre}» ({caso.fecha})?\n\n'
-                f'Se borrarán su tabla privada y {len(copias)} copias anonimizadas asociadas. '
-                'Los documentos originales se conservan. Sin la tabla no podrás restaurar los códigos del caso.',
-                parent=ventana, default='no',
-            ):
+    def download_restored(self):
+        path = self.restored_selection()
+        if path is None:
+            return
+        if self.busy:
+            return
+        from conversion import FORMATS
+        formats = sorted(FORMATS, key=lambda item: item[1] != '*' + path.suffix.lower())
+        if not any(pattern == '*' + path.suffix.lower() for _, pattern in formats):
+            formats.insert(0, ('Formato original', '*' + path.suffix))
+        destination = filedialog.asksaveasfilename(title='Descargar como',
+            initialfile=path.name, defaultextension=path.suffix,
+            filetypes=formats)
+        if destination:
+            target = Path(destination)
+            if target.suffix.lower() != path.suffix.lower():
+                self.busy = True
+                self.activity.start(12)
+                self.download_result_button.config(state='disabled')
+                self.status.set('Convirtiendo descarga…')
+                threading.Thread(target=self.convert_download, args=(path, target), daemon=True).start()
                 return
             try:
-                caso.eliminar(copias)
-            except OSError:
-                messagebox.showerror('No se eliminó el caso', 'No se completó el borrado. La tabla se conserva; cierra los documentos abiertos y vuelve a intentarlo.', parent=ventana)
+                if target.resolve() != path.resolve():
+                    shutil.copy2(path, destination)
+                self.status.set(f'Archivo descargado: {destination}')
+            except OSError as exc:
+                messagebox.showerror('Descargar archivo', str(exc))
+
+    def convert_download(self, source, destination):
+        from conversion import convert_file
+        try:
+            convert_file(source, destination, lambda text: self.events.put(('download_progress', text)))
+            self.events.put(('download_done', f'Archivo descargado: {destination}'))
+        except Exception as exc:
+            self.events.put(('download_error', str(exc)))
+
+    def close(self):
+        if self.busy:
+            self.cancel_processing()
+        else:
+            self.destroy()
+
+    def cancel_processing(self):
+        if self.busy:
+            self.cancel_event.set()
+            self.cancel_button.config(state='disabled')
+            self.status.set('Cancelando…')
+
+    def clear_progress(self):
+        self.log.config(state='normal')
+        self.log.delete('1.0', 'end')
+        self.log.config(state='disabled')
+        self.progress_page = None
+        self.seen_progress_findings = set()
+
+    def show_page_progress(self, message):
+        activity = re.fullmatch(r'(?:Analizando|Anonimizando|Restaurando) página (\d+) de (\d+)', message)
+        if activity:
+            self.page_activity = (self.active_filename, activity.group(1), message)
+            self.status.set(message)
+            return
+        finding = re.match(r'^(?:Detectado|Anonimizando) ([A-Z_]+): (.*?) — (.+)$', message, re.DOTALL)
+        if not finding:
+            page = re.search(r'página (\d+)', message, re.IGNORECASE)
+            if page:
+                activity = getattr(self, 'page_activity', None)
+                self.status.set(activity[2] if activity and activity[:2] == (self.active_filename, page.group(1))
+                                else 'Analizando página ' + page.group(1))
+            return
+        kind, value, location = finding.groups()
+        page = re.search(r'página (\d+)', location, re.IGNORECASE)
+        title = 'Página ' + page.group(1) if page else 'Documento'
+        key = (self.active_filename, title)
+        if not hasattr(self, 'seen_progress_findings'):
+            self.seen_progress_findings = set()
+        item_key = (key, kind, ' '.join(value.split()).casefold())
+        if item_key in self.seen_progress_findings:
+            return
+        self.seen_progress_findings.add(item_key)
+        self.log.config(state='normal')
+        if key != self.progress_page:
+            self.log.insert('end', ('\n' if self.progress_page else '') + title + '\n', 'pagina')
+            self.progress_page = key
+        label = 'Identificación' if kind in {'DOCUMENTO', 'IDENTIFICACION'} else 'Nombre' if kind in {'PERSONA', 'NOMBRE_FORMULARIO', 'PROFESIONAL'} else 'Nombre o identificación'
+        self.log.insert('end', f"{label}: {' '.join(value.split())}\n")
+        self.log.see('end')
+        self.log.config(state='disabled')
+        activity = getattr(self, 'page_activity', None)
+        self.status.set(activity[2] if page and activity and activity[:2] == (self.active_filename, page.group(1)) else title)
+
+    def update_mode(self, *_):
+        mode = self.mode.get()
+        self.input_frame.pack_forget()
+        self.judgment_frame.pack_forget()
+        self.recovery_bar.pack_forget()
+        self.manual_frame.pack_forget()
+        if mode == 'fallo':
+            self.output_grid.pack_forget()
+            self.folder_button.pack_forget()
+            self.log.pack_forget()
+            self.update_result_controls()
+            self.judgment_frame.pack(fill='x', pady=(12, 5))
+            self.run_button.config(text='Restaurar archivo', state='normal' if self.judgment.get() and self.recovery.get() else 'disabled')
+            self.mode_hint.set('Cargue el archivo y pulse «Restaurar archivo». Se guarda en C:\\TUTELAS\\ANONIMIZADOS.')
+        else:
+            self.results_frame.pack_forget()
+            self.folder_button.pack(side='left', padx=8)
+            self.log.pack(fill='both', expand=True)
+            self.input_frame.pack(fill='x')
+            self.manual_frame.pack(fill='x')
+            self.output_grid.pack(fill='x', pady=8, after=self.manual_frame)
+            self.run_button.config(text='Anonimizar', state='normal')
+            self.mode_hint.set('La copia .restauracion contiene los datos originales sin cifrar. Comparta solo el archivo anonimizado.')
+
+    def choose(self):
+        if self.busy:
+            return
+        if self.mode.get() == 'fallo':
+            self.choose_judgment()
+            return
+        files = filedialog.askopenfilenames(title='Seleccione los archivos originales para anonimizar', initialdir=str(ORIGINALS_FOLDER))
+        for file in files:
+            if file not in self.files:
+                self.files.append(file)
+                self.listing.insert('end', file)
+
+    def choose_judgment(self):
+        if self.busy:
+            return
+        path = filedialog.askopenfilename(title='Cargar archivo anonimizado',
+            initialdir=self.judgment_initial_folder(),
+            filetypes=[('Todos los archivos del caso', '*'),
+                       ('Archivo Word, PDF o texto', ('*.docx', '*.pdf', '*.txt', '*.md', '*.log', '*.rst'))])
+        if path:
+            self.selected_restored.set('')
+            self.judgment.set(path)
+            self.judgment_name.set(Path(path).name)
+            self.reset_recovery()
+            if '_restaurado_' in Path(path).stem.lower():
+                self.selected_restored.set(path)
+                self.status.set('Este archivo ya está restaurado. Puede abrirlo o descargarlo.')
+            else:
+                self.detect_recovery(path)
+
+    def detect_recovery(self, path):
+        document = Path(path)
+        self.reset_recovery()
+        candidates = [Path(str(document) + '.restauracion')]
+        for folder in (RESTORATION_FOLDER, Path(__file__).resolve().parent / 'salida'):
+            candidate = folder / (document.name + '.restauracion')
+            if candidate not in candidates:
+                candidates.append(candidate)
+        for candidate in candidates:
+            if candidate.is_file():
+                self.load_recovery(candidate)
                 return
-            if self.caso is not None and self.caso.ruta.resolve() == caso.ruta.resolve():
-                for comparador in self.winfo_children():
-                    if isinstance(comparador, Comparador):
-                        comparador.destroy()
-                self.preparadas.cerrar()
-                self.caso = None
-                self.boton_cargar.configure(state='disabled')
-                self.archivos = []
-                self.configuraciones = {}
-                self.activo = None
-                self.lista.delete(0, 'end')
-                self.archivo_elegido.set(False)
-                self.generacion += 1
-                self.mostrar_campos()
-                self.conteo.set('Primero crea un nuevo caso o abre uno guardado.')
-                self.preparadas = CopiasPreparadas()
-                self.nombre_caso.set('Sin caso seleccionado')
-                self.vista_guardado = None
-                self.ultima_copia = None
-            lista.delete(fila)
-            del casos[fila]
-            self.estado.set('Caso y copias anonimizadas eliminados. Los originales se conservan.')
-            if not casos:
-                aviso_vacio.pack(anchor='w', pady=8)
+        self.status.set('No se encontró la recuperación automática de este archivo. Conserve el archivo .restauracion generado al anonimizar junto al documento.')
 
-        botones = ttk.Frame(marco)
-        botones.pack(fill='x', pady=(12, 0))
-        ttk.Button(botones, text='Eliminar caso', command=eliminar).pack(side='left')
-        ttk.Button(botones, text='Abrir caso', command=elegir).pack(side='right')
-        ttk.Button(botones, text='Cancelar', command=ventana.destroy).pack(side='right', padx=8)
-        lista.bind('<Double-1>', elegir)
-        lista.bind('<Return>', elegir)
-        lista.focus_set()
-        ventana.grab_set()
-        self.wait_window(ventana)
+    def judgment_initial_folder(self):
+        cases = Path(__file__).resolve().parent.parent / 'ANONIMIZADOS'
+        candidates = [cases]
+        if self.judgment.get():
+            candidates.append(Path(self.judgment.get()).parent)
+        candidates.extend((Path(self.output.get()), Path.cwd()))
+        return str(next(path for path in candidates if path.is_dir()))
 
-    def ver_caso(self):
-        carpeta = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'Anonimizador' / 'casos'
-        casos = []
-        for ruta in carpeta.glob('*.json'):
-            try:
-                casos.append(Caso(ruta))
-            except (OSError, ValueError, KeyError, TypeError):
-                continue
-        casos.sort(key=lambda caso: (bool(caso.datos['equivalencias']), caso.ruta.stat().st_mtime), reverse=True)
-        if not casos:
-            messagebox.showinfo('Tabla local', 'No hay tablas locales guardadas. Crea o abre un caso para comenzar.', parent=self)
-            return
-        indice = next((i for i, caso in enumerate(casos) if self.caso and caso.ruta.resolve() == self.caso.ruta.resolve()), 0)
-        ventana = tk.Toplevel(self)
-        ventana.title('Tablas locales de los casos')
-        ventana.geometry('860x460')
-        ventana.minsize(540, 300)
-        ventana.transient(self)
-        marco = ttk.Frame(ventana, padding=16)
-        marco.pack(fill='both', expand=True)
-        ttk.Label(marco, text='Elige el caso cuya tabla quieres consultar:', font=('Segoe UI', 12, 'bold')).pack(anchor='w')
-        selector = ttk.Combobox(marco, state='readonly', values=[
-            f'{caso.nombre} — {caso.fecha} — {len(caso.datos["equivalencias"])} equivalencias'
-            for caso in casos
-        ])
-        selector.pack(fill='x', pady=(6, 0))
-        selector.current(indice)
-        aviso = ttk.Label(marco, text='Tabla privada: contiene los datos originales. Consérvala en este computador.', wraplength=780)
-        aviso.pack(anchor='w', pady=(6, 12))
-        marco.bind('<Configure>', lambda e: aviso.configure(wraplength=max(100, e.width - 32)))
-        area = ttk.Frame(marco)
-        area.pack(fill='both', expand=True)
-        area.columnconfigure(0, weight=1)
-        area.rowconfigure(0, weight=1)
-        tabla = ttk.Treeview(area, columns=('codigo', 'original', 'archivos'), show='headings', selectmode='browse')
-        tabla.heading('codigo', text='Código anonimizado')
-        tabla.heading('original', text='Dato original')
-        tabla.heading('archivos', text='Archivos donde aparece')
-        tabla.column('codigo', width=300, minwidth=280)
-        tabla.column('original', width=220, minwidth=180)
-        tabla.column('archivos', width=340, minwidth=220)
-        tabla.grid(row=0, column=0, sticky='nsew')
-        vertical = ttk.Scrollbar(area, orient='vertical', command=tabla.yview)
-        vertical.grid(row=0, column=1, sticky='ns')
-        horizontal = ttk.Scrollbar(area, orient='horizontal', command=tabla.xview)
-        horizontal.grid(row=1, column=0, sticky='ew')
-        tabla.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
-        resumen = tk.StringVar()
-        ttk.Label(marco, textvariable=resumen, wraplength=780).pack(anchor='w', pady=(10, 0))
-
-        def mostrar(event=None):
-            for fila in tabla.get_children():
-                tabla.delete(fila)
-            caso = casos[selector.current()]
-            equivalencias = caso.datos['equivalencias']
-            for codigo, original in equivalencias.items():
-                fuentes = caso.datos.get('archivos', {}).get(codigo, [])
-                tabla.insert('', 'end', values=(codigo, original, '; '.join(fuentes) or 'Sin registro de archivo (caso anterior)'))
-            resumen.set(f'{len(equivalencias)} equivalencias guardadas.' if equivalencias else
-                        'Este caso no tiene equivalencias. Elige otro caso de la lista para consultar su tabla.')
-
-        selector.bind('<<ComboboxSelected>>', mostrar)
-        mostrar()
-        ttk.Button(marco, text='Cerrar', command=ventana.destroy).pack(anchor='e', pady=(10, 0))
-        ventana.grab_set()
-        self.wait_window(ventana)
-
-    def restaurar_fallo(self):
-        if self.analizando or str(self.boton.cget('state')) == 'disabled':
-            return
-        if not self.caso:
-            self.abrir_caso()
-            if not self.caso:
-                return
-        origen = filedialog.askopenfilename(parent=self, title='Fallo con códigos para restaurar', initialdir=str(CARPETA_DESTINO), filetypes=[('Fallo editable', '*.docx *.txt *.md')])
-        if not origen:
-            return
-        fuente = Path(origen)
-        destino = filedialog.asksaveasfilename(parent=self, title='Guardar fallo con datos originales', initialdir=str(CARPETA_ORIGEN), initialfile='fallo_restaurado' + fuente.suffix.lower(), defaultextension=fuente.suffix.lower(), filetypes=[('Fallo', '*' + fuente.suffix.lower())])
-        if not destino:
+    def open_judgment(self):
+        path = Path(self.judgment.get()) if self.judgment.get() else None
+        if path is None or not path.is_file():
+            messagebox.showinfo('Ver documento', 'Primero cargue el fallo desde ANONIMIZADOS.')
             return
         try:
-            if Path(destino).suffix.lower() != fuente.suffix.lower():
-                raise ValueError('Conserva la extensión del fallo de entrada.')
-            cantidad = restaurar_archivo(fuente, Path(destino), self.caso)
-            self.lector_fallo.cargar(Path(destino))
-            self.pestanas.select(self.lector_fallo)
-            messagebox.showinfo('Fallo restaurado', f'{cantidad} códigos restaurados. Revisa el contenido antes de utilizarlo.\n\n{destino}', parent=self)
-        except (OSError, ValueError, KeyError):
-            messagebox.showerror('No se restauró el fallo', 'Comprueba el caso y el documento. No debe contener códigos desconocidos o modificados y el destino debe ser un archivo nuevo.', parent=self)
-
-    def destroy(self):
-        self.detener_parpadeo()
-        if getattr(self, '_poll', None):
-            self.after_cancel(self._poll)
-            self._poll = None
-        if hasattr(self, 'preparadas'):
-            self.preparadas.cerrar()
-        super().destroy()
-        self._imagenes_casillas.clear()
-        self.datos_variables.clear()
-        for nombre in tuple(vars(self)):
-            if isinstance(getattr(self, nombre), tk.Variable):
-                setattr(self, nombre, None)
-
-    def detener_parpadeo(self):
-        if self._parpadeo is not None:
-            self.after_cancel(self._parpadeo)
-            self._parpadeo = None
-        self._fase_aviso = False
-        if hasattr(self, 'boton_analizar'):
-            self.boton_analizar.configure(style='TButton', text='Iniciar anonimización')
-        if hasattr(self, 'aviso_analisis'):
-            self.aviso_analisis.configure(background='#eef2f7', foreground='#111827', font=('Segoe UI', 10), padding=0)
-
-    def parpadear_analisis(self):
-        self._parpadeo = None
-        config = self.configuraciones.get(self.activo, {})
-        en_curso = self.analizando and 'campos' not in config and not config.get('error')
-        if str(self.boton_analizar.cget('state')) == 'disabled' and not en_curso:
-            self.detener_parpadeo()
-            return
-        self._fase_aviso = not self._fase_aviso
-        self.boton_analizar.configure(
-            style='AnalizandoIntenso.TButton' if self._fase_aviso else 'AnalizandoClaro.TButton',
-            text='Iniciar anonimización')
-        if en_curso:
-            self.aviso_analisis.configure(
-                background='#facc15' if self._fase_aviso else '#fff3c4',
-                foreground='#713f12', font=('Segoe UI', 12, 'bold'), padding=(10, 8))
-        self._parpadeo = self.after(650, self.parpadear_analisis)
-
-    def guardar_activo(self, event=None):
-        if self.cambiando or self.activo not in self.configuraciones:
-            return
-        config = self.configuraciones[self.activo]
-        config['seleccionados'] = [dato for dato, variable in self.datos_variables.items() if variable.get()]
-        self.actualizar_accion()
-
-    def actualizar_accion(self):
-        elegidos = sum(variable.get() for variable in self.datos_variables.values())
-        config = self.configuraciones.get(self.activo, {})
-        seleccion_terminada = bool(elegidos) and 'campos' in config
-        if seleccion_terminada and not self.analizando:
-            self.boton_analizar.grid_remove()
-        else:
-            self.boton_analizar.grid()
-        bloqueado = self.anonimizacion_bloqueada(self.activo)
-        if bloqueado:
-            self.boton_reanonimizar.grid()
-            self.boton_reanonimizar.configure(state='normal' if not self.analizando and str(self.boton.cget('state')) != 'disabled' else 'disabled')
-        else:
-            self.boton_reanonimizar.grid_remove()
-        libre = not bloqueado and not self.analizando and str(self.boton.cget('state')) != 'disabled'
-        listo = not seleccion_terminada and bool(self.activo) and self.archivo_elegido.get() and libre
-        self.boton_analizar.configure(state='normal' if listo else 'disabled')
-        config = self.configuraciones.get(self.activo, {})
-        en_curso = self.analizando and 'campos' not in config and not config.get('error')
-        if listo or en_curso:
-            if self._parpadeo is None:
-                self.parpadear_analisis()
-        else:
-            self.detener_parpadeo()
-        disponible = not bloqueado and bool(elegidos) and not self.analizando and str(self.boton.cget('state')) != 'disabled'
-        self.boton_vista.configure(state='normal' if disponible else 'disabled')
-
-    def archivo_anonimizado(self, archivo):
-        return bool(self.caso and archivo and self.caso.estado_archivo(archivo) == 'Anonimizado')
-
-    def anonimizacion_bloqueada(self, archivo):
-        return self.archivo_anonimizado(archivo) and not self.configuraciones.get(archivo, {}).get('reanonimizar', False)
-
-    def volver_anonimizar(self):
-        if self.analizando or str(self.boton.cget('state')) == 'disabled' or not self.archivo_anonimizado(self.activo):
-            return
-        self.configuraciones[self.activo] = {'seleccionados': [], 'reanonimizar': True}
-        self.mostrar_campos()
-        self.estado.set('Revisión habilitada. Analiza el original y elige los datos. Al guardar se actualizará la misma copia anonimizada.')
-
-    def anonimizar_campos(self):
-        self.guardar_activo()
-        if not self.activo or not self.configuraciones.get(self.activo, {}).get('seleccionados'):
-            return
-        self.previsualizar()
-
-    def ajustar_datos(self, event):
-        self.lienzo_datos.itemconfigure(self.ventana_datos, width=event.width)
-        ttk.Style(self).configure('Dato.TCheckbutton', wraplength=max(100, event.width - 36))
-
-    def rueda_datos(self, event):
-        self.lienzo_datos.yview_scroll(-int(event.delta / 120), 'units')
-        return 'break'
-
-    def previsualizar(self):
-        if self.anonimizacion_bloqueada(self.activo):
-            self.estado.set('Este archivo ya está anonimizado. Su copia guardada está disponible en Ver archivos guardados.')
-            return
-        if not self.activo:
-            messagebox.showinfo('Selecciona un archivo', 'Carga los archivos y pulsa el que quieras comparar.')
-            return
-        if self.analizando or str(self.boton.cget('state')) == 'disabled':
-            messagebox.showinfo('Espera un momento', 'Espera a que termine el análisis o la creación de copias.')
-            return
-        self.guardar_activo()
-        config = self.configuraciones[self.activo]
-        if config.get('error'):
-            messagebox.showerror('Archivo no disponible', config['error'])
-            return
-        if self.caso is None:
-            self.nuevo_caso(recargar=False)
-            if self.caso is None:
-                return
-        for archivo, opciones in self.configuraciones.items():
-            self.caso.registrar(opciones.get('seleccionados', []), archivo=archivo)
-        categorias, terminos = plan_configuracion(config)
-        Comparador(self, self.activo, categorias, terminos, self.preparadas, on_guardar=self.guardar_previsualizado)
-
-    def guardar_previsualizado(self, vista, ruta, categorias, terminos):
-        if self.analizando or str(self.boton.cget('state')) == 'disabled':
-            return
-        if not self.destino.get():
-            self.elegir_destino(parent=vista)
-            if not self.destino.get():
-                return
-        self.vista_guardado = vista
-        if self.iniciar(planes={ruta: (categorias, terminos)}):
-            vista.boton_guardar.configure(state='disabled', text='Guardando copia…')
-        else:
-            self.vista_guardado = None
-
-    def cambiar_archivo(self, event=None):
-        self.guardar_activo()
-        indices = self.lista.curselection()
-        if not indices:
-            self.activo = None
-            self.archivo_elegido.set(False)
-            self.mostrar_campos()
-            return
-        self.activo = self.archivos[indices[0]]
-        self.archivo_elegido.set(True)
-        self.mostrar_campos()
-        if self.anonimizacion_bloqueada(self.activo):
-            self.estado.set('Este archivo ya está anonimizado. Su copia guardada está disponible en Ver archivos guardados.')
-
-    def iniciar_archivo(self):
-        if self.anonimizacion_bloqueada(self.activo):
-            return
-        if not self.activo or not self.archivo_elegido.get() or self.analizando or str(self.boton.cget('state')) == 'disabled':
-            return
-        config = self.configuraciones[self.activo]
-        if 'campos' not in config:
-            self.analizando = True
-            self.boton.configure(state='disabled')
-            self.lista.configure(state='disabled')
-            self.estado.set('Detectando campos del archivo elegido. Después marca los datos que quieras ocultar.')
-            threading.Thread(target=self.analizar_archivos, args=([self.activo], self.generacion), daemon=True).start()
-        self.mostrar_campos()
-
-    def mostrar_campos(self):
-        self.cambiando = True
-        config = self.configuraciones.get(self.activo, {})
-        campos = config.get('campos', {})
-        self.titulo_campos.set('2. Campos de ' + self.activo.name if self.activo else '2. Selecciona un archivo para ver sus campos')
-        self.boton_vista.grid()
-        for widget in self.panel_datos.winfo_children():
-            widget.destroy()
-        self.datos_variables.clear()
-        self.casillas_datos.clear()
-        seleccionados = {tuple(dato) for dato in config.get('seleccionados', [])}
-        total = sum(len(valores) for valores in campos.values())
-        for nombre in PATRONES:
-            valores = campos.get(nombre, [])
-            ttk.Label(self.panel_datos, text=f'{self.etiquetas.get(nombre, nombre)} ({len(valores)})', font=('Segoe UI', 11, 'bold')).pack(anchor='w', pady=(10, 4))
-            if not valores:
-                ttk.Label(self.panel_datos, text='Sin datos detectados.').pack(anchor='w', padx=8)
-            for valor in valores:
-                dato = (nombre, valor)
-                variable = tk.BooleanVar(value=dato in seleccionados)
-                self.datos_variables[dato] = variable
-                casilla = ttk.Checkbutton(self.panel_datos, text=valor, variable=variable, style='Dato.TCheckbutton', command=self.guardar_activo, state='disabled' if self.analizando or self.anonimizacion_bloqueada(self.activo) else 'normal')
-                casilla.pack(fill='x', anchor='w', padx=4, pady=2)
-                casilla.bind('<MouseWheel>', self.rueda_datos)
-                self.casillas_datos.append(casilla)
-        resumen = [f'{total} datos encontrados. Marca uno por uno los que quieras ocultar.']
-        if self.anonimizacion_bloqueada(self.activo):
-            resumen = ['Este archivo ya está anonimizado. Puedes consultar su copia en Ver archivos guardados.']
-        elif config.get('error'):
-            resumen = ['No se pudo analizar este archivo: ' + config['error']]
-        elif not self.activo:
-            resumen = ['Primero crea o abre un caso y carga la demanda.' if not self.caso else 'Elige un archivo para continuar con estos campos.']
-        elif 'campos' not in config:
-            resumen = ['Detectando campos del archivo elegido…' if self.analizando else 'Marca la casilla de selección y pulsa Iniciar anonimización.']
-        elif not total:
-            resumen = ['No se detectaron nombres, identificaciones ni correos.']
-        # Mantiene el panel compacto; cada campo muestra su número de valores.
-        self.resumen_campos.set('\n'.join(resumen))
-        self.detener_parpadeo()
-        if self.analizando and 'campos' not in config and not config.get('error'):
-            self.parpadear_analisis()
-        self.cambiando = False
-        self.actualizar_accion()
-
-    def analizar_archivos(self, archivos, generacion):
-        from analisis import analizar
-        for archivo in archivos:
-            try:
-                if archivo.suffix.lower() not in FORMATOS:
-                    raise ValueError('Formato no compatible.')
-                campos = analizar(archivo)
-                self.eventos.put(('analizado', generacion, archivo, campos, None))
-            except Exception as exc:
-                self.eventos.put(('analizado', generacion, archivo, {}, str(exc)))
-        self.eventos.put(('analisis_fin', generacion))
-
-    def elegir_origen(self):
-        if self.caso is None:
-            return
-        if self.analizando or str(self.boton.cget('state')) == 'disabled':
-            return
-        ruta = filedialog.askdirectory(parent=self, title='Selecciona la carpeta de documentos', initialdir=str(CARPETA_ORIGEN))
-        if ruta:
-            try:
-                SelectorArchivos(self, ruta, self.cargar_archivos)
-            except OSError:
-                messagebox.showerror('Carpeta no disponible', 'No se pudo leer la carpeta seleccionada.', parent=self)
-
-    def elegir_archivos(self):
-        if self.caso is None:
-            return
-        if self.analizando or str(self.boton.cget('state')) == 'disabled':
-            return
-        rutas = filedialog.askopenfilenames(
-            title='Demanda y anexos de la tutela',
-            parent=self,
-            initialdir=str(CARPETA_ORIGEN),
-            filetypes=filtros_documentos())
-        if rutas:
-            self.cargar_archivos(rutas)
-
-    def cargar_archivos(self, rutas):
-        if self.caso is None:
-            return
-        if not rutas:
-            return
-        self.guardar_activo()
-        self.archivos = [Path(ruta) for ruta in rutas]
-        self.caso.recuperar_estados_archivos(self.archivos, [self.destino.get(), CARPETA_DESTINO])
-        self.caso.registrar_archivos(self.archivos)
-        self.configuraciones = {p: {'seleccionados': []} for p in self.archivos}
-        self.generacion += 1
-        self.analizando = False
-        self.boton.configure(state='normal')
-        self.origen.set(str(self.archivos[0].parent))
-        self.lista.delete(0, 'end')
-        for path in self.archivos:
-            marca = '' if path.suffix.lower() in FORMATOS else ' [formato no compatible]'
-            self.lista.insert('end', f'[{self.caso.estado_archivo(path)}] {path.name}{marca}')
-        self.activo = None
-        self.archivo_elegido.set(False)
-        self.mostrar_campos()
-        self.conteo.set(f'{len(self.archivos)} archivos cargados. Elige uno de la lista.')
-        self.estado.set('Elige un archivo, marca sus datos y pulsa Anonimizar campos seleccionados.')
-
-    def elegir_destino(self, parent=None):
-        ruta = filedialog.askdirectory(parent=parent or self, title='Carpeta donde guardar las copias', initialdir=self.destino.get() or str(Path.home()))
-        if ruta:
-            self.destino.set(ruta)
-            try:
-                config = self.ruta_configuracion()
-                config.parent.mkdir(parents=True, exist_ok=True)
-                config.write_text(json.dumps({'destino': ruta}, ensure_ascii=False), encoding='utf-8')
-            except OSError:
-                pass
-
-    def ruta_configuracion(self):
-        return Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'Anonimizador' / 'preferencias.json'
-
-    def cargar_destino(self):
-        try:
-            ruta = json.loads(self.ruta_configuracion().read_text(encoding='utf-8')).get('destino', '')
-            if ruta and Path(ruta).is_dir():
-                self.destino.set(ruta)
-        except (OSError, ValueError, TypeError):
-            pass
-
-    def cargar(self):
-        if self.caso is None:
-            return
-        self.lista.delete(0, 'end')
-        self.archivos = []
-        if not self.origen.get():
-            self.conteo.set('Sin archivos. Elige archivos o una carpeta para comenzar.')
-            return
-        try:
-            base = Path(self.origen.get())
-            encontrados = list(base.rglob('*') if self.subcarpetas.get() else base.iterdir())
-            archivos = [p for p in encontrados if p.is_file()]
-            self.archivos = sorted(archivos, key=lambda p: str(p).lower())
-            self.caso.recuperar_estados_archivos(self.archivos, [self.destino.get(), CARPETA_DESTINO])
-            self.caso.registrar_archivos(self.archivos)
-            compatibles = sum(p.suffix.lower() in FORMATOS for p in self.archivos)
-            for path in self.archivos:
-                marca = '' if path.suffix.lower() in FORMATOS else ' [formato no compatible]'
-                self.lista.insert('end', f'[{self.caso.estado_archivo(path)}] {path.relative_to(base)}{marca}')
-            self.conteo.set(f'{len(archivos)} archivos encontrados · {compatibles} compatibles.' if archivos else 'No hay archivos en esta carpeta. Prueba Incluir subcarpetas o Elegir archivos.')
+            os.startfile(str(path.resolve()))
         except OSError as exc:
-            messagebox.showerror('Carpeta no disponible', str(exc))
+            messagebox.showerror('Ver documento', f'No se pudo abrir el archivo: {exc}')
 
-    def abrir_destino(self):
-        if not self.destino.get():
-            messagebox.showinfo('Carpeta de destino', 'Primero elige dónde guardar las copias.', parent=self)
+    def reset_recovery(self):
+        self.recovery.set('')
+        if self.mode.get() == 'fallo':
+            self.run_button.config(state='disabled')
+        self.recovery_name.set('Ninguna tabla cargada')
+        self.recovery_info.set('La recuperación se identifica automáticamente al cargar un archivo.')
+        self.anonymized_source.set('Insumo anonimizado asociado: sin cargar')
+        self.recovery_fields.delete(*self.recovery_fields.get_children())
+
+    def clear(self):
+        if not self.busy:
+            self.files.clear()
+            self.listing.delete(0, 'end')
+
+    def choose_recovery(self):
+        if self.busy:
             return
-        carpeta = Path(self.destino.get()).resolve()
-        if not carpeta.is_dir():
-            messagebox.showerror('Carpeta no disponible', 'La carpeta de destino ya no está disponible.', parent=self)
+        if not self.judgment.get():
+            self.mode.set('fallo')
+            self.choose_judgment()
+            if not self.judgment.get():
+                return
+            if self.recovery.get():
+                return
+        path = filedialog.askopenfilename(title='Cargue la tabla .restauracion o el insumo anonimizado que la acompaña',
+            initialdir=str(Path(self.judgment.get()).parent),
+            filetypes=[('Todos los archivos del caso', '*'),
+                       ('Tabla de correspondencias', '*.restauracion'),
+                       ('Tabla e insumos anonimizados', ('*.restauracion', '*.pdf', '*.docx', '*.txt', '*.md', '*.log', '*.rst'))])
+        if path:
+            self.load_recovery(path)
+
+    def load_recovery(self, path):
+        self.reset_recovery()
+        path = Path(path)
+        recovery_path = path if path.suffix.lower() == '.restauracion' else Path(str(path) + '.restauracion')
+        try:
+            body, _ = read_recovery(recovery_path)
+        except Exception as exc:
+            messagebox.showerror('Recuperación no válida', str(exc))
             return
-        ruta = filedialog.askopenfilename(
-            parent=self, title='Ver documento guardado',
-            initialdir=str(carpeta),
-            filetypes=filtros_documentos(),
-        )
-        if not ruta:
+        self.recovery.set(str(recovery_path))
+        if self.mode.get() == 'fallo':
+            self.run_button.config(state='normal', text='Restaurar archivo')
+        self.recovery_name.set(recovery_path.name)
+        associated = Path(str(recovery_path)[:-len('.restauracion')])
+        self.anonymized_source.set(f'Insumo anonimizado asociado: {associated}' + ('' if associated.is_file() else ' (no está en esta carpeta)'))
+        self.recovery_fields.delete(*self.recovery_fields.get_children())
+        for code, value in sorted(body['fields'].items()):
+            self.recovery_fields.insert('', 'end', values=(code, value))
+        self.recovery_info.set(f"Insumo de origen: {body['name']} · {len(body['fields'])} campos guardados.")
+        self.status.set('Archivo listo para restaurar.')
+
+    def show_fields(self):
+        if not self.recovery.get():
+            messagebox.showinfo('Campos', 'Elija primero una copia .restauracion.')
             return
         try:
-            os.startfile(str(Path(ruta).resolve()))
-        except OSError:
-            messagebox.showerror(
-                'No se pudo abrir la copia',
-                'Comprueba que el archivo existe y que tienes una aplicación compatible con su formato instalada.',
-                parent=self,
-            )
+            body, _ = read_recovery(self.recovery.get())
+            fields = body.get('fields', {})
+            if not fields:
+                raise ValueError('Esta copia no contiene campos guardados. Vuelva a anonimizar el original con esta versión para crearlos.')
+        except Exception as exc:
+            messagebox.showerror('Campos', str(exc))
+            return
+        window = tk.Toplevel(self)
+        window.title('Campos para redactar y restaurar el fallo')
+        window.geometry('820x440')
+        ttk.Label(window, text='Consulta de campos del caso. Los códigos que ya aparezcan en el fallo se restaurarán automáticamente; no necesita copiarlos ni seleccionarlos aquí.', wraplength=780).pack(padx=15, pady=10)
+        table = ttk.Treeview(window, columns=('code', 'value'), show='headings', selectmode='browse')
+        table.heading('code', text='Código para el fallo')
+        table.heading('value', text='Dato original')
+        table.column('code', width=280)
+        table.column('value', width=450)
+        scroll = ttk.Scrollbar(window, orient='vertical', command=table.yview)
+        table.configure(yscrollcommand=scroll.set)
+        scroll.pack(side='right', fill='y')
+        table.pack(fill='both', expand=True, padx=15)
+        for code, value in sorted(fields.items()):
+            table.insert('', 'end', values=(code, value))
+        def copy_code():
+            if table.selection():
+                code = table.item(table.selection()[0], 'values')[0]
+                self.clipboard_clear()
+                self.clipboard_append(code)
+        ttk.Button(window, text='Copiar código seleccionado', command=copy_code).pack(pady=10)
 
-    def iniciar(self, planes=None):
-        if self.analizando:
-            return
-        self.guardar_activo()
-        if planes is None:
-            planes = {}
-            for archivo, config in self.configuraciones.items():
-                if config.get('error'):
-                    continue
-                if not config.get('seleccionados'):
-                    continue
-                planes[archivo] = plan_configuracion(config)
-        planes = {archivo: plan for archivo, plan in planes.items() if not self.anonimizacion_bloqueada(archivo)}
-        seleccion = list(planes)
-        if not seleccion and any(self.anonimizacion_bloqueada(p) for p in self.archivos):
-            messagebox.showinfo('Archivos ya anonimizados', 'Los archivos anonimizados no se vuelven a procesar. Selecciona un archivo pendiente y marca sus datos.', parent=self)
-            return
-        if not seleccion or not self.destino.get():
-            messagebox.showinfo('Faltan datos', 'Elige la carpeta de destino y marca los datos concretos que quieres anonimizar. Los archivos sin datos marcados no se procesan.')
-            return
-        destino = Path(self.destino.get()).resolve()
-        if (self.origen.get() and destino == Path(self.origen.get()).resolve()) or any(destino == p.parent.resolve() for p in seleccion):
-            messagebox.showerror('Elige otra carpeta', 'La carpeta de destino debe ser diferente de la de origen.')
-            return
-        self.boton.configure(state='disabled')
-        self.boton_vista.configure(state='disabled')
-        self.lista.configure(state='disabled')
-        for casilla in self.casillas_datos:
-            casilla.configure(state='disabled')
-        self.progreso.configure(maximum=len(seleccion), value=0)
-        self.ultima_copia = None
-        self.estado.set('Procesando… La detección de nombres puede tardar al cargar el modelo local.')
-        threading.Thread(target=self.trabajar, args=(seleccion, destino, planes), daemon=True).start()
-        return True
+    def choose_output(self):
+        value = filedialog.askdirectory()
+        if value:
+            self.output.set(value)
 
-    def trabajar(self, seleccion, destino, planes):
-        ok = 0
-        for i, origen in enumerate(seleccion, 1):
-            extension = '.docx' if self.preparadas.caso else '.png' if origen.suffix.lower() in IMAGENES else FORMATOS_ANTIGUOS.get(origen.suffix.lower(), origen.suffix.lower())
-            temporal = destino / ('.anon-' + uuid.uuid4().hex + extension)
+    def open_output(self):
+        path = RESTORATION_FOLDER if self.mode.get() == 'fallo' else Path(self.output.get())
+        if path.is_dir():
+            os.startfile(path)
+        else:
+            messagebox.showinfo('Salida', 'La carpeta se creará al procesar archivos.')
+
+    def run(self):
+        if self.busy:
+            return
+        mode = self.mode.get()
+        files = [self.judgment.get()] if mode == 'fallo' and self.judgment.get() else ([] if mode == 'fallo' else list(self.files))
+        if not files:
+            messagebox.showerror('Falta el fallo' if mode == 'fallo' else 'Falta selección',
+                                 'Primero pulse «Cargar archivo…» y seleccione el fallo del sustanciador.' if mode == 'fallo' else 'Seleccione al menos un archivo.')
+            return
+        if mode == 'fallo' and not self.recovery.get():
+            self.detect_recovery(self.judgment.get())
+            if self.recovery.get():
+                return self.run()
+            messagebox.showerror('No se encontró la recuperación', 'No se encontró el archivo .restauracion asociado. Debe conservarse junto al archivo anonimizado o en C:\\TUTELAS\\ANONIMIZADOS.')
+            return
+        if mode != 'fallo' and not self.output.get().strip():
+            messagebox.showerror('Carpeta', 'Seleccione una carpeta de salida.')
+            return
+        output = str(RESTORATION_FOLDER) if mode == 'fallo' else self.output.get()
+        manual, automatic = self.manual.get('1.0', 'end').splitlines(), self.auto.get()
+        self.busy = True
+        self.restored_file = ''
+        self.cancel_event.clear()
+        self.clear_progress()
+        self.cancel_button.config(state='normal', text='Cancelar anonimización' if mode == 'anonimizar' else 'Cancelar restauración')
+        self.run_button.config(state='disabled', text='Procesando…')
+        self.activity.start(12)
+        self.status.set('Analizando… No se guardará nada hasta que autorice las propuestas.' if mode == 'anonimizar' else 'Restaurando archivo original…' if mode == 'fallo' else 'Restaurando…')
+        threading.Thread(target=self.work, args=(mode, files, output, manual, automatic, self.recovery.get()), daemon=True).start()
+
+    def report_progress(self, message):
+        check_cancelled()
+        self.events.put(('progress', message))
+
+    def work(self, mode, files, output, manual, automatic, recovery=''):
+        try:
+            with cancellation_scope(getattr(self, 'cancel_event', None)):
+                App._work(self, mode, files, output, manual, automatic, recovery)
+        except ProcessingCancelled:
+            self.events.put(('done', 'Proceso cancelado.'))
+        except Exception as exc:
+            self.events.put(('error', str(exc)))
+            self.events.put(('done', 'No se pudo completar el proceso.'))
+
+    def _work(self, mode, files, output, manual, automatic, recovery=''):
+        success, plans = 0, []
+        for index, file in enumerate(files, 1):
+            check_cancelled()
+            self.events.put(('file', Path(file).name))
+            self.report_progress(f'Archivo {index}/{len(files)}: {Path(file).name}')
             try:
-                if self.anonimizacion_bloqueada(origen):
-                    self.eventos.put(('avance', i, 'Omitido: el archivo ya está anonimizado.'))
-                    continue
-                # Nombre neutral: el nombre original también puede contener datos personales.
-                salida = destino / ('anonimizado_' + uuid.uuid4().hex[:12] + extension)
-                existente = self.caso.copia_para_actualizar(origen) if self.caso else None
-                if existente:
-                    salida = existente
-                    temporal = salida.parent / ('.anon-' + uuid.uuid4().hex + extension)
-                categorias, terminos = planes[origen]
-                preparada, count = self.preparadas.obtener(origen, categorias, terminos)
-                if self.caso:
-                    self.caso.guardar()
-                    instrucciones = destino / 'LEER_ANTES_DE_CARGAR_AL_SKILL.txt'
-                    instrucciones.write_text('Carga únicamente los documentos anonimizados. Conserva exactamente todos los códigos entre corchetes al redactar el fallo; no los traduzcas, abrevies ni inventes. Devuelve el proyecto en DOCX para restaurarlo localmente. Nunca cargues la tabla privada de equivalencias. Revisa los documentos antes de compartirlos.', encoding='utf-8')
-                # Guarda exactamente los bytes revisados si las opciones y el original siguen iguales.
-                shutil.copyfile(preparada, temporal)
-                if self.caso:
-                    self.caso.publicar_copia(temporal, salida, origen, reemplazar=bool(existente))
+                if mode == 'anonimizar':
+                    plan = analyze(file, manual, automatic, self.report_progress)
+                    plans.append(plan)
+                    message = f'{Path(file).name}: {len(plan.findings)} propuestas; {plan.ocr_pages} imágenes/páginas con OCR. Pendiente de su autorización.'
+                elif mode == 'fallo':
+                    restored = restore(recovery, output)
+                    self.events.put(('restored', restored))
+                    message = f'{Path(file).name}: archivo original restaurado automáticamente.\nArchivo generado: {restored}'
                 else:
-                    temporal.rename(salida)
-                ok += 1
-                aviso = ' REVISAR: sin coincidencias; puede contener datos no detectados.' if count == 0 else ''
-                self.eventos.put(('avance', i, f'Guardado: {salida} · {count} coincidencias.{aviso}', salida, origen))
+                    raise ValueError('Seleccione «Anonimizar archivos» o «Restaurar archivos anonimizados».')
+                success += 1
+            except ProcessingCancelled:
+                raise
             except Exception as exc:
-                temporal.unlink(missing_ok=True)
-                self.eventos.put(('avance', i, f'Archivo {i}: ERROR ({type(exc).__name__}). No se creó una copia. Comprueba formato, permisos o contraseña.'))
-        self.eventos.put(('fin', ok, len(seleccion)))
+                message = f'{Path(file).name}: ERROR — {exc}'
+                self.events.put(('error', message))
+            if mode != 'anonimizar' or 'ERROR —' in message:
+                self.events.put(('log', message))
+        check_cancelled()
+        if plans:
+            self.events.put(('review', (plans, output)))
+        else:
+            self.events.put(('done', 'Proceso terminado' if success == len(files) else 'Revise los errores.'))
 
-    def recibir(self):
+    def save_approved(self, selections, output):
+        self.busy = True
+        self.restored_file = ''
+        self.cancel_event.clear()
+        self.clear_progress()
+        self.cancel_button.config(state='normal', text='Cancelar anonimización')
+        self.run_button.config(state='disabled', text='Procesando…')
+        self.activity.start(12)
+        self.status.set('Aplicando únicamente las propuestas autorizadas…')
+        threading.Thread(target=self.save_work, args=(selections, output), daemon=True).start()
+
+    def save_work(self, selections, output):
+        try:
+            with cancellation_scope(self.cancel_event):
+                App._save_work(self, selections, output)
+        except ProcessingCancelled:
+            self.events.put(('done', 'Anonimización cancelada.'))
+
+    def _save_work(self, selections, output):
+        success = 0
+        for plan, ids in selections:
+            check_cancelled()
+            self.events.put(('file', plan.path.name))
+            try:
+                result = apply_review(plan, ids, output, self.report_progress)
+                zones = sum(plan.findings[identity]['kind'] == 'ZONA' for identity in ids)
+                self.events.put(('log', f'Guardado: {result["output"]}\nZonas de firma aplicadas: {zones}'))
+                message = None
+                success += 1
+            except ProcessingCancelled:
+                raise
+            except Exception as exc:
+                message = f'{plan.path.name}: ERROR — {exc}'
+            if message:
+                self.events.put(('log', message))
+        self.events.put(('done', 'Proceso terminado' if success == len(selections) else 'Revise los errores.'))
+
+    def poll(self):
         try:
             while True:
-                evento = self.eventos.get_nowait()
-                if evento[0] == 'analizado':
-                    _, generacion, archivo, campos, error = evento
-                    if generacion != self.generacion:
+                kind, message = self.events.get_nowait()
+                if kind == 'file':
+                    self.active_filename = message
+                    self.progress_page = None
+                elif kind in {'download_done', 'download_error', 'download_progress'}:
+                    if kind == 'download_progress':
+                        self.status.set(message)
+                    else:
+                        self.busy = False
+                        self.activity.stop()
+                        self.update_result_controls()
+                        self.status.set(message if kind == 'download_done' else 'No se pudo convertir la descarga.')
+                        if kind == 'download_error':
+                            messagebox.showerror('Error al convertir la descarga', message)
+                elif kind == 'log':
+                    self.log.config(state='normal')
+                    self.log.insert('end', message + '\n\n')
+                    self.log.see('end')
+                    self.log.config(state='disabled')
+                elif kind == 'progress':
+                    if not self.cancel_event.is_set():
+                        self.show_page_progress(message)
+                elif kind == 'error':
+                    self.busy = False
+                    self.activity.stop()
+                    self.cancel_button.config(state='disabled')
+                    self.run_button.config(state='normal', text='Restaurar archivo' if self.mode.get() == 'fallo' else 'Anonimizar')
+                    self.status.set('No se pudo completar el proceso.')
+                    messagebox.showerror('Error al procesar el archivo', message)
+                elif kind == 'restored':
+                    self.restored_file = message
+                    self.selected_restored.set(message)
+                elif kind == 'review':
+                    self.busy = False
+                    self.activity.stop()
+                    self.run_button.config(state='normal', text='Anonimizar')
+                    self.cancel_button.config(state='disabled')
+                    if self.cancel_event.is_set():
+                        self.status.set('Anonimización cancelada.')
                         continue
-                    self.configuraciones[archivo]['campos'] = campos
-                    if error:
-                        self.configuraciones[archivo]['error'] = error
-                    if self.activo == archivo:
-                        self.mostrar_campos()
-                elif evento[0] == 'analisis_fin':
-                    if evento[1] != self.generacion:
-                        continue
-                    self.analizando = False
-                    self.lista.configure(state='normal')
-                    self.boton.configure(state='normal')
-                    self.conteo.set(f'{len(self.archivos)} archivos. Pulsa cada uno y marca sus campos.')
-                    self.estado.set('Análisis terminado. Marca en pantalla los datos que deseas anonimizar.')
-                    if self.activo:
-                        self.mostrar_campos()
-                elif evento[0] == 'avance':
-                    if len(evento) > 3:
-                        self.ultima_copia = evento[3]
-                    if len(evento) > 4:
-                        self.configuraciones.get(evento[4], {}).pop('reanonimizar', None)
-                    self.progreso.configure(value=evento[1])
-                    if 'ERROR' in evento[2] or 'REVISAR:' in evento[2]:
-                        self.estado.set(evento[2])
+                    plans, output = message
+                    self.status.set('Revise las propuestas y autorice las que desea aplicar. No se han generado archivos.')
+                    ReviewWindow(self, plans, lambda selections: self.save_approved(selections, output))
                 else:
-                    self.actualizar_estado_caso()
-                    if self.caso:
-                        for archivo, (_, casilla) in zip(self.archivos, self.lista.filas):
-                            marca = '' if archivo.suffix.lower() in FORMATOS else ' [formato no compatible]'
-                            casilla.configure(text=f'[{self.caso.estado_archivo(archivo)}] {archivo.name}{marca}')
-                    self.boton.configure(state='normal')
-                    self.lista.configure(state='normal')
-                    if self.activo:
-                        self.mostrar_campos()
-                    self.estado.set(f'Terminado: {evento[1]} de {evento[2]} copias creadas. Revisa los resultados antes de compartir.')
-                    if self.vista_guardado and self.vista_guardado.winfo_exists():
-                        if evento[1] == evento[2]:
-                            self.vista_guardado.mostrar_guardado(self.ultima_copia)
-                            if self.ultima_copia:
-                                copia = str(self.ultima_copia)
-                                self.vista_guardado.boton_abrir.configure(command=lambda ruta=copia: os.startfile(ruta))
-                                self.vista_guardado.boton_abrir.pack(side='right', padx=8)
-                        else:
-                            self.vista_guardado.boton_guardar.configure(text='Reintentar guardar copia', state='normal')
-                            self.vista_guardado.estado.set('No se pudo guardar la copia. Comprueba los permisos de la carpeta de destino.')
-                    padre_aviso = self.vista_guardado if self.vista_guardado and self.vista_guardado.winfo_exists() else self
-                    self.vista_guardado = None
-                    if evento[1] > 0 and evento[1] == evento[2]:
-                        if self.ultima_copia:
-                            mensaje = 'La copia anonimizada se guardó correctamente.\n\nUbicación:\n' + str(self.ultima_copia)
-                        else:
-                            mensaje = f'Se guardaron correctamente {evento[1]} copias anonimizadas.'
-                        # La comparación puede cubrir la ventana principal: el aviso
-                        # debe pertenecer a la ventana que el usuario está viendo.
-                        messagebox.showinfo('Guardado completado', mensaje, parent=padre_aviso)
+                    self.busy = False
+                    self.activity.stop()
+                    label = 'Restaurar archivo' if self.mode.get() == 'fallo' else 'Anonimizar'
+                    self.run_button.config(state='normal', text='Proceso terminado' if message == 'Proceso terminado' else label)
+                    self.cancel_button.config(state='disabled')
+                    self.status.set(message)
+                    if self.restored_file:
+                        restored = self.restored_file
+                        self.restored_file = ''
+                        self.status.set('Proceso terminado. Puede abrir o descargar el archivo restaurado.')
+                        self.update_idletasks()
+                        try:
+                            os.startfile(str(Path(restored).resolve()))
+                        except OSError as exc:
+                            messagebox.showinfo('Archivo restaurado', f'Archivo guardado en: {restored}\nNo se pudo abrir automáticamente: {exc}')
         except queue.Empty:
             pass
-        self._poll = self.after(150, self.recibir)
+        self.after(150, self.poll)
 
 
 if __name__ == '__main__':
-    Anonimizador().mainloop()
+    App().mainloop()

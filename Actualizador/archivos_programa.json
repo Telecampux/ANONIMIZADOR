@@ -1,0 +1,22 @@
+{
+  "archivos": [
+    "iniciar.bat",
+    "app.py",
+    "anonimizador.py",
+    "assets/anonimizador.ico",
+    "assets/anonimizador.png",
+    "conversion.py",
+    "crear_acceso_directo.ps1",
+    "entidades.py",
+    "estilo.py",
+    "estilo_casillas.py",
+    "instalar_ocr.ps1",
+    "ocr_local.py",
+    "procesamiento.py",
+    "README.md",
+    "requirements.txt",
+    "restauracion_campos.py",
+    "revision.py",
+    "verificacion.py"
+  ]
+}
