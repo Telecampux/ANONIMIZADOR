@@ -23,3 +23,5 @@ $shortcut.Description = 'Descargar y actualizar el software Anonimizador'
 $shortcut.Save()
 Write-Host "Actualizador instalado: $installation"
 Write-Host "Acceso directo creado: $shortcutPath"
+Write-Host 'Abriendo el actualizador para descargar la version de GitHub...'
+Start-Process -FilePath (Join-Path $installation 'Actualizar.bat') -WorkingDirectory $installation

@@ -57,6 +57,7 @@ class App(tk.Tk):
         modes.pack(fill='x')
         for value, label in [('anonimizar', 'Anonimizar archivos'), ('fallo', 'Restaurar archivos anonimizados')]:
             ttk.Radiobutton(modes, text=label, variable=self.mode, value=value).pack(side='left', padx=(0, 24))
+        ttk.Button(modes, text='Instalar nueva versión', command=self.install_new_version).pack(side='right')
         document_area = ttk.Frame(frame)
         document_area.pack(fill='x')
         self.input_frame = ttk.Frame(document_area)
@@ -222,6 +223,21 @@ class App(tk.Tk):
             self.cancel_processing()
         else:
             self.destroy()
+
+    def install_new_version(self):
+        if self.busy:
+            messagebox.showinfo('Actualización', 'Espere a que termine el proceso actual.')
+            return
+        launcher = Path(__file__).resolve().parent / 'Actualizar.bat'
+        if not launcher.is_file():
+            messagebox.showerror('Actualización', f'No se encuentra {launcher.name} en la carpeta del programa.')
+            return
+        try:
+            os.startfile(str(launcher))
+        except OSError as error:
+            messagebox.showerror('Actualización', str(error))
+            return
+        self.destroy()
 
     def cancel_processing(self):
         if self.busy:

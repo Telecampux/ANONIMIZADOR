@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import shutil
 import tempfile
 import urllib.request
@@ -17,6 +19,7 @@ BRANCH = "main"
 ARCHIVE_URL = f"https://github.com/{REPOSITORY}/archive/refs/heads/{BRANCH}.zip"
 MANIFEST = "Actualizador/archivos_programa.json"
 PROTECTED = {".git", ".venv", "salida", "tessdata", "tmp", "capturas", "casos"}
+SAVED_FOLDER = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Anonimizador" / "carpeta_programa.txt"
 
 
 def valid_path(raw: str) -> Path:
@@ -83,11 +86,31 @@ def install(staging: Path, destination: Path, paths: list[Path]) -> None:
             raise
 
 
+def update_direct(destination: Path) -> None:
+    destination = destination.resolve()
+    if not (destination / "app.py").is_file() or not (destination / "Iniciar.bat").is_file():
+        raise ValueError(f"No se encuentra el Anonimizador en {destination}")
+    print("Descargando la version actual de GitHub...", flush=True)
+    with tempfile.TemporaryDirectory(prefix="anonimizador_actualizacion_") as work_name:
+        work = Path(work_name)
+        archive = work / "version.zip"
+        with urllib.request.urlopen(ARCHIVE_URL, timeout=60) as response, archive.open("wb") as output:
+            shutil.copyfileobj(response, output)
+        paths = read_package(archive, work / "nuevo")
+        print(f"Actualizando {len(paths)} archivos en {destination}...", flush=True)
+        install(work / "nuevo", destination, paths)
+    print("Actualizacion terminada.", flush=True)
+
+
 def main() -> None:
     window = tk.Tk()
     window.title("Actualizar Anonimizador")
     window.geometry("620x230")
-    folder = tk.StringVar()
+    try:
+        remembered = SAVED_FOLDER.read_text(encoding="utf-8").strip()
+    except OSError:
+        remembered = ""
+    folder = tk.StringVar(value=remembered)
     status = tk.StringVar(value="Seleccione la carpeta donde ya está instalado el Anonimizador.")
     frame = ttk.Frame(window, padding=18)
     frame.pack(fill="both", expand=True)
@@ -104,6 +127,8 @@ def main() -> None:
             messagebox.showerror("Carpeta incorrecta", "Elija la carpeta que contiene app.py e Iniciar.bat.")
             return
         target = target.resolve()
+        SAVED_FOLDER.parent.mkdir(parents=True, exist_ok=True)
+        SAVED_FOLDER.write_text(str(target), encoding="utf-8")
         status.set("Descargando y comprobando la nueva versión…")
         window.update_idletasks()
         try:
@@ -134,4 +159,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--direct":
+        try:
+            update_direct(Path(sys.argv[2]))
+        except Exception as error:
+            print(f"Error de actualizacion: {error}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        main()

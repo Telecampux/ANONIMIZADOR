@@ -1,5 +1,7 @@
 {
   "archivos": [
+    "Actualizar.bat",
+    "Actualizador/actualizar.py",
     "Iniciar.bat",
     "app.py",
     "anonimizador.py",
