@@ -14,6 +14,7 @@ from revision import ReviewWindow
 from estilo import configurar_estilos
 from estilo_casillas import configurar_casillas
 from procesamiento import ProcessingCancelled, cancellation_scope, check_cancelled
+from actualizacion import installed_version, update_direct
 
 
 ORIGINALS_FOLDER = Path(r'C:\TUTELAS\ORIGINALES')
@@ -25,7 +26,7 @@ class App(tk.Tk):
         super().__init__()
         configurar_estilos(self)
         configurar_casillas(self)
-        self.title('Anonimizador · Revisión y autorización · 2026.11.17.7')
+        self.title(f'Anonimizador · Revisión y autorización · {installed_version(Path(__file__).resolve().parent)}')
         icon = Path(__file__).resolve().parent / 'assets' / 'anonimizador.ico'
         if icon.is_file():
             self.iconbitmap(str(icon))
@@ -52,6 +53,7 @@ class App(tk.Tk):
         frame = ttk.Frame(self, padding=22)
         frame.pack(fill='both', expand=True)
         ttk.Label(frame, text='Anonimizador reversible', font=('Segoe UI', 22, 'bold')).pack(anchor='w')
+        ttk.Label(frame, text=f'Versión instalada: {installed_version(Path(__file__).resolve().parent)}').pack(anchor='w')
         ttk.Label(frame, text='OCR local en español e inglés · Originales intactos · Restauración de archivos anonimizados').pack(anchor='w', pady=(3, 15))
         modes = ttk.Frame(frame)
         modes.pack(fill='x')
@@ -231,11 +233,17 @@ class App(tk.Tk):
         self.status.set('Descargando e instalando la nueva versión desde GitHub…')
         self.update_idletasks()
         try:
-            from actualizacion import update_direct
-            update_direct(Path(__file__).resolve().parent)
+            installed = update_direct(
+                Path(__file__).resolve().parent,
+                confirm=lambda current, available: messagebox.askyesno(
+                    'Instalar nueva versión',
+                    f'Versión instalada: {current}\nVersión en GitHub: {available}\n\n¿Desea instalarla?')))
         except Exception as error:
             messagebox.showerror('Actualización', str(error))
             self.status.set('No se pudo completar la actualización.')
+            return
+        if not installed:
+            self.status.set('Actualización cancelada.')
             return
         messagebox.showinfo('Actualización', 'Nueva versión instalada. Abra de nuevo el Anonimizador.')
         self.destroy()

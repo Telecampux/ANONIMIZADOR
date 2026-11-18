@@ -46,7 +46,15 @@ def _stage(archive: Path, staging: Path) -> list[Path]:
         return paths
 
 
-def update_direct(destination: Path) -> None:
+def installed_version(destination: Path) -> str:
+    version_file = destination / "VERSION"
+    try:
+        return version_file.read_text(encoding="utf-8").strip() or "Desconocida"
+    except OSError:
+        return "Anterior a 2026.11.18.1"
+
+
+def update_direct(destination: Path, confirm=None) -> bool:
     destination = destination.resolve()
     if not (destination / "app.py").is_file() or not (destination / "Iniciar.bat").is_file():
         raise ValueError(f"No se encuentra el Anonimizador en {destination}")
@@ -55,6 +63,18 @@ def update_direct(destination: Path) -> None:
         archive = work / "version.zip"
         with urllib.request.urlopen(ARCHIVE_URL, timeout=60) as response, archive.open("wb") as output:
             shutil.copyfileobj(response, output)
+        with zipfile.ZipFile(archive) as bundle:
+            roots = {name.split("/", 1)[0] for name in bundle.namelist() if "/" in name}
+            if len(roots) != 1:
+                raise ValueError("El paquete de GitHub no tiene una raíz única.")
+            try:
+                available = bundle.read(f"{roots.pop()}/VERSION").decode("utf-8").strip()
+            except KeyError as error:
+                raise ValueError("La versión de GitHub no está identificada.") from error
+        if not available:
+            raise ValueError("La versión de GitHub está vacía.")
+        if confirm is not None and not confirm(installed_version(destination), available):
+            return False
         paths = _stage(archive, work / "nuevo")
         backup = work / "anterior"
         replaced: list[Path] = []
@@ -82,3 +102,4 @@ def update_direct(destination: Path) -> None:
     old_updater = destination / "Actualizador"
     if old_updater.is_dir() and not old_updater.is_symlink():
         shutil.rmtree(old_updater)
+    return True
