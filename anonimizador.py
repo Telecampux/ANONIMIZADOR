@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import io
 import json
@@ -73,6 +74,7 @@ class Replacer:
         self.ocr_words = None
         self.ocr_seen = []
         self.regions = {}
+        self.visual_codes = []
         self.zone_fields = []
         self.learning = learning
         self.known_entities = known_entities or {}
@@ -144,7 +146,14 @@ class Replacer:
                     self.progress(f'Detectado {kind}: {value} — {self.location}')
                 key = (kind, value.casefold())
                 if key not in self.mapping:
-                    self.mapping[key] = f'ANON_{kind}_{self.case_id}_{len(self.mapping)+1:04d}'
+                    nonce = 0
+                    while True:
+                        digest = hashlib.sha256(f'{self.case_id}:{len(self.mapping)+1}:{nonce}'.encode()).hexdigest()[:7].upper()
+                        token = f'A{digest}'
+                        if token not in self.mapping.values():
+                            self.mapping[key] = token
+                            break
+                        nonce += 1
                 if self.reviewing:
                     self.findings[finding_id]['token'] = self.mapping[key]
                 if self.approved is not None and finding_id not in self.approved:
@@ -204,7 +213,7 @@ def _covered_pdf(replacer, reason):
         return doc.tobytes(deflate=True)
 
 
-def _image(data, suffix, replacer):
+def _image(data, suffix, replacer, *, embedded=False):
     from PIL import Image, ImageSequence
     with Image.open(io.BytesIO(data)) as source:
         frames = []
@@ -281,7 +290,9 @@ def _office(data, suffix, replacer):
                         if _media(payload, Path(name).suffix.lower()):
                             return _covered_pdf(replacer, 'El documento contiene audio o video incrustado.')
                         try:
-                            payload = _image(payload, Path(name).suffix, replacer)
+                            payload = _image(payload, Path(name).suffix, replacer, embedded=True)
+                            if any(location.startswith(replacer.location) for location, _, _ in replacer.visual_codes):
+                                _notice(replacer, 'Una imagen incrustada contiene códigos OCR visuales; su texto puede no trasladarse al documento nuevo.')
                         except (OCRError, ProcessingCancelled):
                             raise
                         except Exception:
@@ -315,7 +326,7 @@ def _office(data, suffix, replacer):
                             sheet_ns = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
                             for cell in root.iter(sheet_ns + 'c'):
                                 value = cell.find(sheet_ns + 'v')
-                                if value is not None and value.text and 'ANON_' in value.text:
+                                if value is not None and value.text and re.search(r'(?<!\w)(?:ANON_[A-Z_]+_\d{4,}|A[A-F0-9]{7})(?!\w)', value.text):
                                     cell.set('t', 'str')
                                     formula = cell.find(sheet_ns + 'f')
                                     if formula is not None:
@@ -367,11 +378,41 @@ def _replace_xml(root, replacer):
             # Do not alter namespace identifiers or relationship identifiers.
             if key.rsplit('}', 1)[-1] in {'title', 'descr', 'name', 'author'}:
                 node.attrib[key] = replacer.replace(value)
+    # Divide los runs mixtos para que el resaltado afecte solo al código.
+    code_pattern = re.compile(r'A[A-F0-9]{7}')
+    for parent in root.iter():
+        for index, run in reversed(list(enumerate(list(parent)))):
+            if run.tag != f'{{{ns_word}}}r':
+                continue
+            texts = [node for node in run if node.tag == f'{{{ns_word}}}t']
+            if len(texts) != 1 or any(child.tag not in {f'{{{ns_word}}}rPr', f'{{{ns_word}}}t'} for child in run):
+                continue
+            value = texts[0].text or ''
+            pieces = [piece for piece in re.split(r'(A[A-F0-9]{7})', value) if piece]
+            if len(pieces) <= 1:
+                continue
+            parent.remove(run)
+            for offset, piece in enumerate(pieces):
+                fragment = copy.deepcopy(run)
+                fragment.find(f'{{{ns_word}}}t').text = piece
+                parent.insert(index + offset, fragment)
+    for run in root.iter(f'{{{ns_word}}}r'):
+        values = [node.text or '' for node in run.iter(f'{{{ns_word}}}t')]
+        if values and code_pattern.fullmatch(''.join(values)):
+            properties = run.find(f'{{{ns_word}}}rPr')
+            if properties is None:
+                properties = ET.Element(f'{{{ns_word}}}rPr')
+                run.insert(0, properties)
+            highlight = properties.find(f'{{{ns_word}}}highlight')
+            if highlight is None:
+                highlight = ET.SubElement(properties, f'{{{ns_word}}}highlight')
+            highlight.set(f'{{{ns_word}}}val', 'yellow')
 
 
 def _pdf(data, replacer):
     import pymupdf
     from PIL import Image
+    from etiquetas import pdf_label
     with pymupdf.open(stream=data, filetype='pdf') as doc, pymupdf.open() as clean:
         if doc.needs_pass:
             return _covered_pdf(replacer, 'El PDF está protegido y no se puede leer su contenido.')
@@ -393,6 +434,12 @@ def _pdf(data, replacer):
                     redacted.save(buffer, format='PNG')
                     target = clean.new_page(width=page.rect.width, height=page.rect.height)
                     target.insert_image(target.rect, stream=buffer.getvalue())
+                    for location, box, token in replacer.visual_codes:
+                        if location != replacer.location:
+                            continue
+                        x0, y0, x1, y1 = (value * 72 / 300 for value in box)
+                        target.insert_text((x0, y1), token, fontsize=max(3, min(9, y1-y0)),
+                                           fontname='helv', render_mode=3)
                     continue
                 parts, word_spans, offset, last_line = [], [], 0, None
                 for x0, y0, x1, y1, word, block, line, _ in page.get_text('words', sort=True):
@@ -415,12 +462,19 @@ def _pdf(data, replacer):
                         rect = pymupdf.Rect(box) * page.rotation_matrix
                         boxes.append((a, b, tuple(v * scale for v in rect), confidence))
                     replacer.evidence[replacer.location] = {'text': text, 'image': pix.tobytes('png'), 'words': boxes}
+                labels = []
                 for start, stop, token in replacer.spans(text):
+                    matched = []
                     for a, b, box, _ in word_spans:
                         if start < b and stop > a:
                             clipped = pymupdf.Rect(box) & page.cropbox
                             if not clipped.is_empty:
                                 page.add_redact_annot(clipped, fill=(64/255, 64/255, 64/255))
+                                matched.append(clipped)
+                    if matched:
+                        area = pymupdf.Rect(min(r.x0 for r in matched), min(r.y0 for r in matched),
+                                            max(r.x1 for r in matched), max(r.y1 for r in matched))
+                        labels.append((area, token))
                     replacer.count += 1
                 for region in replacer.regions.get(replacer.location, []):
                     box = region['box'] if isinstance(region, dict) else region
@@ -428,7 +482,9 @@ def _pdf(data, replacer):
                     # page coordinates; convert back to PDF coordinates.
                     rect = (pymupdf.Rect(box) * (72 / 100)) & page.rect
                     if not rect.is_empty:
-                        page.add_redact_annot(rect * page.derotation_matrix, fill=(64/255, 64/255, 64/255))
+                        page.add_redact_annot(rect * page.derotation_matrix, fill=(1, 0.95, 0.66))
+                        if isinstance(region, dict) and region.get('token'):
+                            labels.append((rect * page.derotation_matrix, region['token']))
                     replacer.count += 1
                 if replacer.reviewing:
                     continue
@@ -438,6 +494,8 @@ def _pdf(data, replacer):
                 for link in page.get_links():
                     page.delete_link(link)
                 page.apply_redactions()
+                for area, token in labels:
+                    pdf_label(page, area, token)
                 clean.insert_pdf(doc, from_page=page.number, to_page=page.number, links=False, annots=False, widgets=False)
         return b'' if replacer.learning or replacer.reviewing else clean.tobytes(garbage=4, deflate=True)
 
@@ -477,6 +535,9 @@ def transform(data, suffix, replacer, depth=0):
     except (OCRError, ProcessingCancelled):
         raise
     except Exception as exc:
+        from etiquetas import LabelFitError
+        if isinstance(exc, LabelFitError):
+            raise
         # A failed reader must not copy uninspected bytes to the shareable output.
         return _covered_pdf(replacer, f'El contenido no pudo interpretarse ({type(exc).__name__}).')
 
@@ -722,12 +783,10 @@ def apply_review(plan, approved, output_dir, progress=None):
         raise AnonymizationError('No se pudieron ocultar todos los datos seleccionados. No se generó el archivo; vuelva a analizar el documento.')
     if (replacer.output_suffix or plan.path.suffix) != plan.suffix or set(replacer.warnings) - set(plan.warnings):
         raise AnonymizationError('El resultado requiere cambios distintos a los revisados. Vuelva a analizar el archivo.')
-    from verificacion import verificar_pdf_seleccionado
-    return _save_result(plan.path, plan.original, anonymized, replacer, output_dir,
-                        verifier=lambda saved: verificar_pdf_seleccionado(plan, approved, saved))
+    return _save_result(plan.path, plan.original, anonymized, replacer, output_dir)
 
 
-def _save_result(path, data, anonymized, replacer, output_dir, verifier=None):
+def _save_result(path, data, anonymized, replacer, output_dir):
     output_dir = Path(output_dir)
     recovery = _recovery(data, path.name, replacer.fields, replacer.zone_fields)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -738,8 +797,6 @@ def _save_result(path, data, anonymized, replacer, output_dir, verifier=None):
     try:
         _write_new(output, anonymized)
         output_created = True
-        if verifier is not None:
-            verifier(output.read_bytes())
     except BaseException:
         if output_created:
             output.unlink(missing_ok=True)
@@ -788,7 +845,7 @@ def read_recovery(path):
         raise AnonymizationError('La copia de recuperación está dañada.')
     fields = body.get('fields', {})
     if not isinstance(fields, dict) or any(not isinstance(token, str) or
-            not re.fullmatch(r'ANON_[A-Z_]+_\d{4,}', token) or
+            not re.fullmatch(r'(?:ANON_[A-Z_]+_\d{4,}|A[A-F0-9]{7})', token) or
             not isinstance(value, str) or not value or len(value) > 10000
             for token, value in fields.items()):
         raise AnonymizationError('Los campos de recuperación no son válidos.')

@@ -142,7 +142,7 @@ def analyze_field_restoration(path, recovery, progress=None):
     _transform(original, path.suffix.lower(), replacer)
     if not replacer.findings:
         raise AnonymizationError('Los campos editables del fallo no corresponden a esta recuperación. Seleccione la recuperación de los insumos utilizados por el sustanciador. Los escaneos y bloques negros no se sustituyen como texto.')
-    unknown = set(re.findall(r'(?<!\w)ANON_[A-Z_]+_\d{4,}(?!\w)',
+    unknown = set(re.findall(r'(?<!\w)(?:ANON_[A-Z_]+_\d{4,}|A[A-F0-9]{7})(?!\w)',
                              '\n'.join(item['text'] for item in replacer.evidence.values()))) - fields.keys()
     warnings = [f"Recuperación del caso: {body['name']}.",
                 'Solo se sustituyen los códigos autorizados. El texto nuevo del fallo se conserva.']
@@ -165,7 +165,7 @@ def apply_field_review(plan, approved, output_dir, progress=None):
         raise AnonymizationError('Los campos ya no corresponden a la revisión. Vuelva a analizar el fallo.')
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    target = output_dir / f'fallo_restaurado_{secrets.token_hex(4)}{plan.path.suffix}'
+    target = output_dir / f'documento_restaurado_{secrets.token_hex(4)}{plan.path.suffix}'
     _write_new(target, restored)
     return {'output': str(target.resolve()), 'replacements': replacer.count}
 
@@ -173,7 +173,7 @@ def apply_field_review(plan, approved, output_dir, progress=None):
 def restore_judgment(path, recovery, output_dir, progress=None):
     """Restore every existing code in the judgment, without manual selection."""
     plan = analyze_field_restoration(path, recovery, progress)
-    codes = set(re.findall(r'(?<!\w)ANON_[A-Z_]+_\d{4,}(?!\w)',
+    codes = set(re.findall(r'(?<!\w)(?:ANON_[A-Z_]+_\d{4,}|A[A-F0-9]{7})(?!\w)',
                            '\n'.join(item['text'] for item in plan.evidence.values())))
     unknown = codes - plan.restoration_fields.keys()
     if unknown:

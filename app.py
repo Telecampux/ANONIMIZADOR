@@ -44,6 +44,7 @@ class App(tk.Tk):
         self.output = tk.StringVar(value=str(Path(__file__).resolve().parent.parent / 'ANONIMIZADOS'))
         self.auto = tk.BooleanVar(value=True)
         self.mode = tk.StringVar(value='anonimizar')
+        self.restore_kind = tk.StringVar(value='original')
         self.recovery = tk.StringVar()
         self.judgment = tk.StringVar()
         self.judgment_name = tk.StringVar(value='Seleccione el archivo que desea restaurar')
@@ -70,11 +71,22 @@ class App(tk.Tk):
         ttk.Button(bar, text='Limpiar selección', command=self.clear).pack(side='left', padx=8)
         self.listing = tk.Listbox(self.input_frame, height=5)
         self.listing.pack(fill='x')
-        self.judgment_frame = ttk.LabelFrame(document_area, text='1. Archivo anonimizado', padding=10)
-        ttk.Label(self.judgment_frame, text='Archivo anonimizado por esta aplicación cuyos datos originales desea restaurar.', wraplength=700).pack(anchor='w')
+        self.judgment_frame = ttk.LabelFrame(document_area, text='Restaurar archivos anonimizados', padding=10)
+        self.local_restore_notice = ttk.Label(
+            self.judgment_frame,
+            text='PRIVACIDAD: los datos personales se procesan solo en el sistema local.',
+            foreground='#9a3412', font=('Segoe UI', 10, 'bold'), wraplength=760)
+        self.local_restore_notice.pack(anchor='w', fill='x', pady=(0, 10))
+        for value, label in (
+            ('original', 'Restaurar una copia idéntica del archivo original'),
+            ('elaborado', 'Restaurar sentencia, fallo, auto u otro documento elaborado por el sustanciador'),
+        ):
+            ttk.Radiobutton(self.judgment_frame, text=label, variable=self.restore_kind,
+                            value=value, command=self.update_restoration_kind).pack(anchor='w', pady=3)
         judgment_buttons = ttk.Frame(self.judgment_frame)
-        judgment_buttons.pack(fill='x')
-        ttk.Button(judgment_buttons, text='Cargar archivo…', command=self.choose_judgment).pack(side='left')
+        judgment_buttons.pack(fill='x', pady=(8, 0))
+        ttk.Button(judgment_buttons, text='Seleccionar archivo',
+                   command=self.load_downloaded_judgment).pack(side='left')
         ttk.Label(self.judgment_frame, textvariable=self.judgment_name, font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(5, 0))
         self.judgment_path = ttk.Entry(self.judgment_frame, textvariable=self.judgment, state='readonly')
         recovery_bar = self.recovery_bar = ttk.LabelFrame(document_area, text='Recuperación identificada automáticamente', padding=10)
@@ -131,14 +143,14 @@ class App(tk.Tk):
                                         style='Proceso.Horizontal.TProgressbar')
         self.activity.pack(side='right', padx=8)
         ttk.Label(frame, textvariable=self.status, wraplength=790).pack(anchor='w', pady=6)
-        results = self.results_frame = ttk.LabelFrame(frame, text='2. Archivo restaurado', padding=10)
+        results = self.results_frame = ttk.LabelFrame(frame, text='Archivo restaurado para revisión', padding=10)
         self.result_name = tk.StringVar(value='')
         ttk.Label(results, textvariable=self.result_name, wraplength=700).pack(anchor='w', pady=(0, 5))
         result_actions = ttk.Frame(results)
         result_actions.pack(fill='x')
         self.open_result_button = ttk.Button(result_actions, text='Abrir', command=self.open_restored, state='disabled')
         self.open_result_button.pack(side='left', padx=8)
-        self.download_result_button = ttk.Button(result_actions, text='Descargar como…', command=self.download_restored, state='disabled')
+        self.download_result_button = ttk.Button(result_actions, text='Guardar copia revisada…', command=self.download_restored, state='disabled')
         self.download_result_button.pack(side='left')
         self.selected_restored.trace_add('write', self.update_result_controls)
         self.log = tk.Text(frame, height=6, state='disabled', wrap='word')
@@ -189,36 +201,20 @@ class App(tk.Tk):
             return
         if self.busy:
             return
-        from conversion import FORMATS
-        formats = sorted(FORMATS, key=lambda item: item[1] != '*' + path.suffix.lower())
-        if not any(pattern == '*' + path.suffix.lower() for _, pattern in formats):
-            formats.insert(0, ('Formato original', '*' + path.suffix))
-        destination = filedialog.asksaveasfilename(title='Descargar como',
+        destination = filedialog.asksaveasfilename(title='Guardar copia revisada',
             initialfile=path.name, defaultextension=path.suffix,
-            filetypes=formats)
+            filetypes=[('Mismo formato del documento', '*' + path.suffix)])
         if destination:
             target = Path(destination)
             if target.suffix.lower() != path.suffix.lower():
-                self.busy = True
-                self.activity.start(12)
-                self.download_result_button.config(state='disabled')
-                self.status.set('Convirtiendo descarga…')
-                threading.Thread(target=self.convert_download, args=(path, target), daemon=True).start()
+                messagebox.showerror('Guardar copia', 'Conserve el formato del documento restaurado.')
                 return
             try:
                 if target.resolve() != path.resolve():
                     shutil.copy2(path, destination)
-                self.status.set(f'Archivo descargado: {destination}')
+                self.status.set(f'Copia guardada: {destination}')
             except OSError as exc:
-                messagebox.showerror('Descargar archivo', str(exc))
-
-    def convert_download(self, source, destination):
-        from conversion import convert_file
-        try:
-            convert_file(source, destination, lambda text: self.events.put(('download_progress', text)))
-            self.events.put(('download_done', f'Archivo descargado: {destination}'))
-        except Exception as exc:
-            self.events.put(('download_error', str(exc)))
+                messagebox.showerror('Guardar copia', str(exc))
 
     def close(self):
         if self.busy:
@@ -308,8 +304,7 @@ class App(tk.Tk):
             self.log.pack_forget()
             self.update_result_controls()
             self.judgment_frame.pack(fill='x', pady=(12, 5))
-            self.run_button.config(text='Restaurar archivo', state='normal' if self.judgment.get() and self.recovery.get() else 'disabled')
-            self.mode_hint.set('Cargue el archivo y pulse «Restaurar archivo». Se guarda en C:\\TUTELAS\\ANONIMIZADOS.')
+            self.update_restoration_kind(clear=False)
         else:
             self.results_frame.pack_forget()
             self.folder_button.pack(side='left', padx=8)
@@ -320,11 +315,24 @@ class App(tk.Tk):
             self.run_button.config(text='Anonimizar', state='normal')
             self.mode_hint.set('La copia .restauracion contiene los datos originales sin cifrar. Comparta solo el archivo anonimizado.')
 
+    def update_restoration_kind(self, clear=True):
+        if clear:
+            self.judgment.set('')
+            self.judgment_name.set('Seleccione el archivo que desea restaurar')
+            self.selected_restored.set('')
+            self.reset_recovery()
+        original = self.restore_kind.get() == 'original'
+        label = 'Restaurar copia exacta del original' if original else 'Restaurar documento del sustanciador en local'
+        self.run_button.config(text=label,
+                               state='normal' if self.judgment.get() and self.recovery.get() else 'disabled')
+        self.mode_hint.set('Seleccione el archivo anonimizado y su recuperación. Todo se procesa en este equipo.' if original else
+                           'Descargue el documento elaborado por el sustanciador y selecciónelo. Los datos originales se restauran solo en este equipo.')
+
     def choose(self):
         if self.busy:
             return
         if self.mode.get() == 'fallo':
-            self.choose_judgment()
+            self.load_downloaded_judgment()
             return
         files = filedialog.askopenfilenames(title='Seleccione los archivos originales para anonimizar', initialdir=str(ORIGINALS_FOLDER))
         for file in files:
@@ -332,23 +340,30 @@ class App(tk.Tk):
                 self.files.append(file)
                 self.listing.insert('end', file)
 
-    def choose_judgment(self):
+    def load_downloaded_judgment(self):
+        """Selecciona el archivo de una de las dos formas de restauración."""
         if self.busy:
             return
-        path = filedialog.askopenfilename(title='Cargar archivo anonimizado',
-            initialdir=self.judgment_initial_folder(),
-            filetypes=[('Todos los archivos del caso', '*'),
-                       ('Archivo Word, PDF o texto', ('*.docx', '*.pdf', '*.txt', '*.md', '*.log', '*.rst'))])
-        if path:
-            self.selected_restored.set('')
-            self.judgment.set(path)
-            self.judgment_name.set(Path(path).name)
-            self.reset_recovery()
-            if '_restaurado_' in Path(path).stem.lower():
-                self.selected_restored.set(path)
-                self.status.set('Este archivo ya está restaurado. Puede abrirlo o descargarlo.')
-            else:
-                self.detect_recovery(path)
+        downloads = Path.home() / 'Downloads'
+        original = self.restore_kind.get() == 'original'
+        path = filedialog.askopenfilename(
+            title='Seleccione el archivo anonimizado original' if original else
+                  'Seleccione el documento anonimizado elaborado por el sustanciador',
+            initialdir=str(downloads if downloads.is_dir() else Path.home()),
+            filetypes=[('Todos los archivos', '*')] if original else
+                      [('Documentos con códigos de texto', ('*.docx', '*.pdf', '*.txt', '*.md', '*.log', '*.rst')),
+                       ('Todos los archivos', '*')])
+        if not path:
+            return
+        self.selected_restored.set('')
+        self.judgment.set(path)
+        self.judgment_name.set(Path(path).name)
+        if original and Path(path).suffix.lower() == '.restauracion':
+            self.load_recovery(path)
+        else:
+            self.detect_recovery(path)
+        if not self.recovery.get():
+            self.choose_recovery()
 
     def detect_recovery(self, path):
         document = Path(path)
@@ -363,24 +378,6 @@ class App(tk.Tk):
                 self.load_recovery(candidate)
                 return
         self.status.set('No se encontró la recuperación automática de este archivo. Conserve el archivo .restauracion generado al anonimizar junto al documento.')
-
-    def judgment_initial_folder(self):
-        cases = Path(__file__).resolve().parent.parent / 'ANONIMIZADOS'
-        candidates = [cases]
-        if self.judgment.get():
-            candidates.append(Path(self.judgment.get()).parent)
-        candidates.extend((Path(self.output.get()), Path.cwd()))
-        return str(next(path for path in candidates if path.is_dir()))
-
-    def open_judgment(self):
-        path = Path(self.judgment.get()) if self.judgment.get() else None
-        if path is None or not path.is_file():
-            messagebox.showinfo('Ver documento', 'Primero cargue el fallo desde ANONIMIZADOS.')
-            return
-        try:
-            os.startfile(str(path.resolve()))
-        except OSError as exc:
-            messagebox.showerror('Ver documento', f'No se pudo abrir el archivo: {exc}')
 
     def reset_recovery(self):
         self.recovery.set('')
@@ -400,12 +397,7 @@ class App(tk.Tk):
         if self.busy:
             return
         if not self.judgment.get():
-            self.mode.set('fallo')
-            self.choose_judgment()
-            if not self.judgment.get():
-                return
-            if self.recovery.get():
-                return
+            return
         path = filedialog.askopenfilename(title='Cargue la tabla .restauracion o el insumo anonimizado que la acompaña',
             initialdir=str(Path(self.judgment.get()).parent),
             filetypes=[('Todos los archivos del caso', '*'),
@@ -425,7 +417,7 @@ class App(tk.Tk):
             return
         self.recovery.set(str(recovery_path))
         if self.mode.get() == 'fallo':
-            self.run_button.config(state='normal', text='Restaurar archivo')
+            self.update_restoration_kind(clear=False)
         self.recovery_name.set(recovery_path.name)
         associated = Path(str(recovery_path)[:-len('.restauracion')])
         self.anonymized_source.set(f'Insumo anonimizado asociado: {associated}' + ('' if associated.is_file() else ' (no está en esta carpeta)'))
@@ -434,40 +426,6 @@ class App(tk.Tk):
             self.recovery_fields.insert('', 'end', values=(code, value))
         self.recovery_info.set(f"Insumo de origen: {body['name']} · {len(body['fields'])} campos guardados.")
         self.status.set('Archivo listo para restaurar.')
-
-    def show_fields(self):
-        if not self.recovery.get():
-            messagebox.showinfo('Campos', 'Elija primero una copia .restauracion.')
-            return
-        try:
-            body, _ = read_recovery(self.recovery.get())
-            fields = body.get('fields', {})
-            if not fields:
-                raise ValueError('Esta copia no contiene campos guardados. Vuelva a anonimizar el original con esta versión para crearlos.')
-        except Exception as exc:
-            messagebox.showerror('Campos', str(exc))
-            return
-        window = tk.Toplevel(self)
-        window.title('Campos para redactar y restaurar el fallo')
-        window.geometry('820x440')
-        ttk.Label(window, text='Consulta de campos del caso. Los códigos que ya aparezcan en el fallo se restaurarán automáticamente; no necesita copiarlos ni seleccionarlos aquí.', wraplength=780).pack(padx=15, pady=10)
-        table = ttk.Treeview(window, columns=('code', 'value'), show='headings', selectmode='browse')
-        table.heading('code', text='Código para el fallo')
-        table.heading('value', text='Dato original')
-        table.column('code', width=280)
-        table.column('value', width=450)
-        scroll = ttk.Scrollbar(window, orient='vertical', command=table.yview)
-        table.configure(yscrollcommand=scroll.set)
-        scroll.pack(side='right', fill='y')
-        table.pack(fill='both', expand=True, padx=15)
-        for code, value in sorted(fields.items()):
-            table.insert('', 'end', values=(code, value))
-        def copy_code():
-            if table.selection():
-                code = table.item(table.selection()[0], 'values')[0]
-                self.clipboard_clear()
-                self.clipboard_append(code)
-        ttk.Button(window, text='Copiar código seleccionado', command=copy_code).pack(pady=10)
 
     def choose_output(self):
         value = filedialog.askdirectory()
@@ -487,8 +445,8 @@ class App(tk.Tk):
         mode = self.mode.get()
         files = [self.judgment.get()] if mode == 'fallo' and self.judgment.get() else ([] if mode == 'fallo' else list(self.files))
         if not files:
-            messagebox.showerror('Falta el fallo' if mode == 'fallo' else 'Falta selección',
-                                 'Primero pulse «Cargar archivo…» y seleccione el fallo del sustanciador.' if mode == 'fallo' else 'Seleccione al menos un archivo.')
+            messagebox.showerror('Falta el documento' if mode == 'fallo' else 'Falta selección',
+                                 'Seleccione primero el archivo que desea restaurar.' if mode == 'fallo' else 'Seleccione al menos un archivo.')
             return
         if mode == 'fallo' and not self.recovery.get():
             self.detect_recovery(self.judgment.get())
@@ -508,8 +466,11 @@ class App(tk.Tk):
         self.cancel_button.config(state='normal', text='Cancelar anonimización' if mode == 'anonimizar' else 'Cancelar restauración')
         self.run_button.config(state='disabled', text='Procesando…')
         self.activity.start(12)
-        self.status.set('Analizando… No se guardará nada hasta que autorice las propuestas.' if mode == 'anonimizar' else 'Restaurando archivo original…' if mode == 'fallo' else 'Restaurando…')
-        threading.Thread(target=self.work, args=(mode, files, output, manual, automatic, self.recovery.get()), daemon=True).start()
+        work_mode = ('original' if self.restore_kind.get() == 'original' else 'fallo') if mode == 'fallo' else mode
+        self.status.set('Analizando… No se guardará nada hasta que autorice las propuestas.' if mode == 'anonimizar' else
+                        'Recuperando el archivo original localmente…' if work_mode == 'original' else
+                        'Restaurando campos del documento localmente…')
+        threading.Thread(target=self.work, args=(work_mode, files, output, manual, automatic, self.recovery.get()), daemon=True).start()
 
     def report_progress(self, message):
         check_cancelled()
@@ -537,9 +498,15 @@ class App(tk.Tk):
                     plans.append(plan)
                     message = f'{Path(file).name}: {len(plan.findings)} propuestas; {plan.ocr_pages} imágenes/páginas con OCR. Pendiente de su autorización.'
                 elif mode == 'fallo':
+                    result = restore_judgment(file, recovery, output, self.report_progress)
+                    self.events.put(('restored', result['output']))
+                    message = (f'{Path(file).name}: documento restaurado localmente; '
+                               f'{result["replacements"]} apariciones de {result["fields"]} campos.\n'
+                               f'Revise el archivo antes de entregarlo: {result["output"]}')
+                elif mode == 'original':
                     restored = restore(recovery, output)
                     self.events.put(('restored', restored))
-                    message = f'{Path(file).name}: archivo original restaurado automáticamente.\nArchivo generado: {restored}'
+                    message = f'{Path(file).name}: copia exacta del archivo original recuperada localmente.\nArchivo: {restored}'
                 else:
                     raise ValueError('Seleccione «Anonimizar archivos» o «Restaurar archivos anonimizados».')
                 success += 1
@@ -582,7 +549,8 @@ class App(tk.Tk):
             try:
                 result = apply_review(plan, ids, output, self.report_progress)
                 zones = sum(plan.findings[identity]['kind'] == 'ZONA' for identity in ids)
-                self.events.put(('log', f'Guardado: {result["output"]}\nZonas de firma aplicadas: {zones}'))
+                self.events.put(('log', f'Guardado: {result["output"]}\n'
+                                         f'Zonas de firma aplicadas: {zones}'))
                 message = None
                 success += 1
             except ProcessingCancelled:
@@ -600,16 +568,6 @@ class App(tk.Tk):
                 if kind == 'file':
                     self.active_filename = message
                     self.progress_page = None
-                elif kind in {'download_done', 'download_error', 'download_progress'}:
-                    if kind == 'download_progress':
-                        self.status.set(message)
-                    else:
-                        self.busy = False
-                        self.activity.stop()
-                        self.update_result_controls()
-                        self.status.set(message if kind == 'download_done' else 'No se pudo convertir la descarga.')
-                        if kind == 'download_error':
-                            messagebox.showerror('Error al convertir la descarga', message)
                 elif kind == 'log':
                     self.log.config(state='normal')
                     self.log.insert('end', message + '\n\n')
@@ -622,7 +580,7 @@ class App(tk.Tk):
                     self.busy = False
                     self.activity.stop()
                     self.cancel_button.config(state='disabled')
-                    self.run_button.config(state='normal', text='Restaurar archivo' if self.mode.get() == 'fallo' else 'Anonimizar')
+                    self.run_button.config(state='normal', text=('Restaurar copia exacta del original' if self.restore_kind.get() == 'original' else 'Restaurar documento del sustanciador en local') if self.mode.get() == 'fallo' else 'Anonimizar')
                     self.status.set('No se pudo completar el proceso.')
                     messagebox.showerror('Error al procesar el archivo', message)
                 elif kind == 'restored':
@@ -642,14 +600,14 @@ class App(tk.Tk):
                 else:
                     self.busy = False
                     self.activity.stop()
-                    label = 'Restaurar archivo' if self.mode.get() == 'fallo' else 'Anonimizar'
+                    label = ('Restaurar copia exacta del original' if self.restore_kind.get() == 'original' else 'Restaurar documento del sustanciador en local') if self.mode.get() == 'fallo' else 'Anonimizar'
                     self.run_button.config(state='normal', text='Proceso terminado' if message == 'Proceso terminado' else label)
                     self.cancel_button.config(state='disabled')
                     self.status.set(message)
                     if self.restored_file:
                         restored = self.restored_file
                         self.restored_file = ''
-                        self.status.set('Proceso terminado. Puede abrir o descargar el archivo restaurado.')
+                        self.status.set('Documento restaurado. Revíselo antes de guardarlo o entregarlo.')
                         self.update_idletasks()
                         try:
                             os.startfile(str(Path(restored).resolve()))

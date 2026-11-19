@@ -147,6 +147,7 @@ def recognize(image):
 
 def redact(image, replacer):
     from PIL import ImageDraw, ImageOps
+    from etiquetas import image_label
     check_cancelled()
     image = ImageOps.exif_transpose(image).convert('RGB')
     cache_key = (image.size, hashlib.sha256(image.tobytes()).hexdigest())
@@ -164,13 +165,15 @@ def redact(image, replacer):
         matches = list(replacer.spans(text))
     finally:
         replacer.ocr_words = None
-    for start, stop, _ in matches:
+    for start, stop, token in matches:
         check_cancelled()
         selected_words = [word for word in words if start < word[1] and stop > word[0]]
         if not selected_words:
             raise OCRError('No se pudo ubicar un dato seleccionado en el escaneo. No se generó una copia anonimizada.')
-        for left, right, (x0, y0, x1, y1), confidence in selected_words:
-            drawing.rectangle((max(0, x0-3), max(0, y0-3), min(image.width-1, x1+3), min(image.height-1, y1+3)), fill='#404040')
+        box = (min(word[2][0] for word in selected_words), min(word[2][1] for word in selected_words),
+               max(word[2][2] for word in selected_words), max(word[2][3] for word in selected_words))
+        image_label(image, box, token)
+        replacer.visual_codes.append((replacer.location, box, token))
         replacer.count += 1
     for region in replacer.regions.get(replacer.location, []):
         box = region['box'] if isinstance(region, dict) else region
@@ -178,7 +181,12 @@ def redact(image, replacer):
         clipped = (max(0, min(image.width - 1, x0)), max(0, min(image.height - 1, y0)),
                    max(0, min(image.width - 1, x1)), max(0, min(image.height - 1, y1)))
         if clipped[2] > clipped[0] and clipped[3] > clipped[1]:
-            drawing.rectangle(clipped, fill='#404040')
+            token = region.get('token') if isinstance(region, dict) else None
+            if token:
+                image_label(image, clipped, token)
+                replacer.visual_codes.append((replacer.location, clipped, token))
+            else:
+                drawing.rectangle(clipped, fill='#fff2a8')
         replacer.count += 1
     replacer.ocr_pages += 1
     if not words:

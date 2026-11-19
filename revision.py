@@ -13,11 +13,11 @@ DATOS_PERSONALES_AUTOMATICOS = frozenset({
 
 
 def draw_redaction(draw, box):
-    """Preview the same dark gray redaction used in the exported file."""
+    """Preview the same field background used in the exported file."""
     x0, y0, x1, y1 = box
     if x1 <= x0 or y1 <= y0:
         return
-    draw.rectangle(box, fill='#404040')
+    draw.rectangle(box, fill='#fff2a8')
 
 
 class ReviewWindow(tk.Toplevel):
@@ -101,7 +101,7 @@ class ReviewWindow(tk.Toplevel):
         self.context.tag_configure('match', background='#ffe180', foreground='#111111')
         zoom_bar = ttk.Frame(image_frame)
         zoom_bar.pack(fill='x')
-        ttk.Label(zoom_bar, text='Arrastre sobre toda la firma: la zona dibujada queda autorizada').pack(side='left')
+        ttk.Label(zoom_bar, text='Vista ampliada del documento').pack(side='left')
         self.zoom = tk.DoubleVar(value=1)
         ttk.Scale(zoom_bar, from_=1, to=6, variable=self.zoom,
                   command=lambda value: self.draw_image()).pack(side='left', fill='x', expand=True)
@@ -115,9 +115,6 @@ class ReviewWindow(tk.Toplevel):
         hscroll.pack(side='bottom', fill='x')
         self.canvas.pack(fill='both', expand=True)
         self.canvas.bind('<Configure>', lambda event: self.draw_image())
-        self.canvas.bind('<ButtonPress-1>', self.start_region)
-        self.canvas.bind('<B1-Motion>', self.drag_region)
-        self.canvas.bind('<ButtonRelease-1>', self.finish_region)
         ttk.Label(frame, text='Seleccione cada aparición que autoriza restaurar. Las demás conservarán su código.' if self.restoring else 'Revise los datos y marque los que autoriza anonimizar.', wraplength=1050).pack(anchor='w')
         bottom = ttk.Frame(frame)
         bottom.pack(fill='x', pady=(10, 0))
@@ -200,7 +197,8 @@ class ReviewWindow(tk.Toplevel):
         self.draw_image()
 
     def get_preview_image(self):
-        """Preview the selected redactions rather than the unmodified scan."""
+        """Preview selected fields with their visible codes."""
+        from etiquetas import image_label
         evidence, finding = self.current
         image = Image.open(io.BytesIO(evidence['image'])).convert('RGB')
         if self.restoring:
@@ -217,12 +215,16 @@ class ReviewWindow(tk.Toplevel):
             selected = plan.findings.get(identity)
             if plan_index != index or not selected or selected['location'] != location:
                 continue
-            if selected.get('box'):
-                draw_redaction(drawing, selected['box'])
-            else:
-                for a, b, (x0, y0, x1, y1), _ in evidence['words']:
-                    if selected['start'] < b and selected['stop'] > a:
-                        draw_redaction(drawing, (max(0, x0-2), max(0, y0-2), min(image.width-1, x1+2), min(image.height-1, y1+2)))
+            boxes = [selected['box']] if selected.get('box') else [
+                box for a, b, box, _ in evidence['words']
+                if selected['start'] < b and selected['stop'] > a]
+            if boxes:
+                box = (min(item[0] for item in boxes), min(item[1] for item in boxes),
+                       max(item[2] for item in boxes), max(item[3] for item in boxes))
+                if selected.get('token'):
+                    image_label(image, box, selected['token'])
+                else:
+                    draw_redaction(drawing, box)
         return image
 
     def draw_image(self):
