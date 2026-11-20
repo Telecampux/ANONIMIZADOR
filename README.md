@@ -1,5 +1,7 @@
 # Anonimizador reversible local
 
+Las carpetas iniciales están junto al programa: `ORIGINALES`, `ANONIMIZADOS` y `PROVIDENCIAS`. En **Configurar carpetas…** puede elegir otras ubicaciones para este usuario. La elección se guarda localmente en `%LOCALAPPDATA%\Anonimizador\carpetas.json`. La aplicación comprueba que las carpetas estén disponibles y que pueda escribir en las dos de salida antes de procesar.
+
 Aplicación de escritorio en español para Windows, con selección de varios archivos. No sube documentos a servicios externos. Necesita Python 3.11 o posterior e internet únicamente para instalar dependencias.
 
 ## Iniciar
@@ -13,10 +15,10 @@ python app.py
 ```
 
 1. Seleccione **Anonimizar archivos** y agregue documentos.
-2. Si hace falta, escriba nombres de personas o identificaciones adicionales, uno por línea. Se buscan sin distinguir mayúsculas; incluya variantes y nombres parciales que también deban ocultarse.
-3. La detección automática propone únicamente nombres propios de personas e identificaciones. Reconoce nombres junto a etiquetas de persona y formulario, e identificaciones junto a sus etiquetas. No propone correos, teléfonos, direcciones ni IP. Son reglas heurísticas: revise los resultados.
+2. Si desea incluir otros datos o variables distintos de nombres, identificaciones y correos, escríbalos en el cuadro, uno por línea. Se buscan sin distinguir mayúsculas; incluya las variantes que también deban ocultarse.
+3. La detección automática propone nombres propios de personas, identificaciones y correos electrónicos. Reconoce nombres junto a etiquetas de persona y formulario, e identificaciones junto a sus etiquetas. También propone correos electrónicos; no propone teléfonos, direcciones ni IP. Son reglas heurísticas: revise los resultados. En la revisión puede seleccionar si se limpian los metadatos de la copia para compartir; la copia `.restauracion` conserva el original íntegro y debe permanecer privada.
 4. Elija la carpeta de salida y pulse **Anonimizar**. El avance muestra únicamente los nombres e identificaciones procesados, agrupados por página. En esta etapa no se guardan resultados ni copias de recuperación.
-5. La ventana de revisión muestra cada dato, su contexto y su ubicación. Los nombres de personas, nombres en formularios, profesionales e identificaciones detectados quedan marcados automáticamente, incluidos los nombres o identificaciones añadidos manualmente. En la pestaña visual los datos marcados se muestran con códigos; desmarcarlos permite volver a verlos en la vista previa.
+5. La ventana de revisión muestra primero los **metadatos** encontrados en el original (por ejemplo, autor, propiedades Office, EXIF y fechas internas del contenedor). También aparecen al inicio de la lista de propuestas en azul, marcados por defecto; su casilla controla la limpieza de los metadatos del archivo. La pestaña Metadatos muestra la lista completa. Después se muestra cada nombre, identificación o correo, su contexto y su ubicación. Los nombres de personas, nombres en formularios, profesionales e identificaciones detectados quedan marcados automáticamente, incluidos los nombres o identificaciones añadidos manualmente. En la pestaña visual los datos marcados se muestran con códigos; desmarcarlos permite volver a verlos en la vista previa.
 6. Revise los nombres e identificaciones marcados automáticamente y desmarque los que desea conservar. Puede autorizar una aparición y conservar otra igual.
 7. Si falta un nombre o identificación ilegible, puede dibujar su zona en la pestaña visual y autorizarla en la revisión.
 8. Pulse **Autorizar seleccionados y generar** para guardar. Cancelar la revisión no genera ningún archivo. Si no hay coincidencias, se muestra el texto reconocido y se puede autorizar explícitamente una copia sin coincidencias o el sustituto indicado en los avisos.
@@ -26,7 +28,7 @@ python app.py
 
 ### Anexos e historias clínicas
 
-El OCR combina la lectura de página completa con contraste mejorado, texto disperso y columnas. Se proponen únicamente nombres de personas e identificaciones, como `CC-12345678`, incluidos los nombres de profesionales etiquetados y nombres separados de sus etiquetas por un salto de línea. Las lecturas adicionales pueden tardar más y las propuestas deben revisarse.
+El OCR combina la lectura de página completa con contraste mejorado, texto disperso y columnas. Se proponen nombres de personas, identificaciones y correos electrónicos, como `CC-12345678`, incluidos los nombres de profesionales etiquetados y nombres separados de sus etiquetas por un salto de línea. Las lecturas adicionales pueden tardar más y las propuestas deben revisarse.
 
 La lectura adaptativa y la eliminación de ruido ayudan con autorizaciones y cédulas fotocopiadas. En PDF se identifican primero los nombres y números personales del documento y después se buscan sus repeticiones en los anexos, incluso con apellidos antes de nombres o pequeñas variaciones del OCR. Se reutiliza el OCR al generar; no se vuelve a reconocer el documento después de autorizar.
 

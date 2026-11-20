@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw, ImageTk
 from estilo import configurar_estilos
 
 DATOS_PERSONALES_AUTOMATICOS = frozenset({
-    'PERSONA', 'NOMBRE_FORMULARIO', 'PROFESIONAL', 'DOCUMENTO', 'IDENTIFICACION', 'DATO',
+    'PERSONA', 'NOMBRE_FORMULARIO', 'PROFESIONAL', 'DOCUMENTO', 'IDENTIFICACION', 'CORREO', 'DATO',
 })
 
 
@@ -25,12 +25,16 @@ class ReviewWindow(tk.Toplevel):
         super().__init__(parent)
         configurar_estilos(self)
         self.restoring = all(getattr(plan, 'purpose', '') == 'restore_fields' for plan in plans)
-        self.title('Revisar campos para restaurar en el fallo' if self.restoring else 'Revisar y autorizar anonimización · 2026.11.17.7')
+        from actualizacion import installed_version
+        self.title('Revisar campos para restaurar en el fallo' if self.restoring else
+                   f'Revisar y autorizar anonimización · {installed_version(Path(__file__).resolve().parent)}')
         width, height = min(1200, self.winfo_screenwidth()-80), min(820, self.winfo_screenheight()-90)
         self.geometry(f'{width}x{height}+25+25')
         self.minsize(min(900, width), min(650, height))
         self.plans, self.on_approve = plans, on_approve
         self.rows, self.chosen = {}, set()
+        self.metadata_rows = set()
+        self.clean_metadata = tk.BooleanVar(value=all(getattr(plan, 'automatic', True) for plan in plans))
         self.row_locations = {}
         self.photo = None
         self.current = None
@@ -39,10 +43,30 @@ class ReviewWindow(tk.Toplevel):
         self.protocol('WM_DELETE_WINDOW', self.cancel)
         frame = ttk.Frame(self, padding=15)
         frame.pack(fill='both', expand=True)
-        ttk.Label(frame, text='Revisa los datos que se cargarán al fallo' if self.restoring else 'Revisa qué se va a anonimizar', font=('Segoe UI', 19, 'bold')).pack(anchor='w')
+        ttk.Label(frame, text='Revisa los datos que se cargarán al fallo' if self.restoring else 'Metadatos, Nombres, Identificaciones y correos electrónicos', font=('Segoe UI', 19, 'bold')).pack(anchor='w')
         instruction = ('Todavía no se ha guardado ningún resultado. Marca cada dato que autorizas restaurar.' if self.restoring else
-                       'Solo se proponen nombres propios de personas e identificaciones. Quedan marcados automáticamente; puede desmarcarlos antes de generar.')
+                       'Se muestran primero los metadatos encontrados; puede elegir si los anonimiza. Después se proponen nombres, identificaciones y correos electrónicos, que puede desmarcar antes de generar.')
         ttk.Label(frame, text=instruction, wraplength=1050).pack(anchor='w', pady=5)
+        if not self.restoring:
+            ttk.Checkbutton(frame, text='Anonimizar metadatos', variable=self.clean_metadata).pack(anchor='w', pady=(5, 2))
+            ttk.Label(frame, text='Metadatos encontrados en el original:').pack(anchor='w', pady=(2, 2))
+            metadata_frame = ttk.Frame(frame)
+            metadata_frame.pack(fill='x')
+            metadata_table = ttk.Treeview(metadata_frame, columns=('file', 'field', 'value'), show='headings', height=4)
+            for key, title, width in [('file', 'Archivo', 200), ('field', 'Campo', 260), ('value', 'Valor encontrado', 540)]:
+                metadata_table.heading(key, text=title)
+                metadata_table.column(key, width=width, stretch=True)
+            metadata_scroll = ttk.Scrollbar(metadata_frame, orient='vertical', command=metadata_table.yview)
+            metadata_table.configure(yscrollcommand=metadata_scroll.set)
+            metadata_table.pack(side='left', fill='x', expand=True)
+            metadata_scroll.pack(side='right', fill='y')
+            for plan in plans:
+                for location, key, value in (getattr(plan, 'metadata', None) or []):
+                    metadata_table.insert('', 'end', values=(plan.path.name, f'{location} / {key}', value))
+            if not metadata_table.get_children():
+                metadata_table.insert('', 'end', values=('', 'Sin metadatos legibles', ''))
+            ttk.Label(frame, text='Los nombres, identificaciones y correos se revisan por aparición en la lista siguiente.',
+                      wraplength=1050).pack(anchor='w', pady=(4, 2))
         tools = ttk.Frame(frame)
         tools.pack(fill='x', pady=5)
         ttk.Button(tools, text='Marcar todos', command=lambda: self.mark_all(True)).pack(side='left')
@@ -53,6 +77,7 @@ class ReviewWindow(tk.Toplevel):
         table_frame.pack(fill='both', expand=True)
         self.table = ttk.Treeview(table_frame, columns=('allow', 'kind', 'value', 'where'), show='headings', height=6)
         self.table.tag_configure('autorizado', background='#e4f2e8', foreground='#164526')
+        self.table.tag_configure('metadato', background='#dbeafe', foreground='#1e3a8a')
         for key, text, width in [('allow', 'Autorizar', 70), ('kind', 'Tipo', 110), ('value', 'Dato que se ocultará', 300), ('where', 'Archivo / ubicación', 450)]:
             if key == 'value' and self.restoring:
                 text = 'Código que se restaurará'
@@ -71,6 +96,13 @@ class ReviewWindow(tk.Toplevel):
         self.table.bind('<space>', self.toggle_current)
         self.table.bind('<<TreeviewSelect>>', self.show_selected)
         for index, plan in enumerate(plans):
+            if not self.restoring:
+                metadata = getattr(plan, 'metadata', None) or []
+                for number, (location, key, value) in enumerate(metadata[:50]):
+                    self.add_row(index, f'__METADATA__:{number}', 'METADATO', f'{key}: {value}', location)
+                if len(metadata) > 50:
+                    self.add_row(index, '__METADATA__:resto', 'METADATO',
+                                 f'{len(metadata) - 50} campos adicionales; consulte la pestaña Metadatos', 'Archivo completo')
             for finding in plan.findings.values():
                 self.add_row(index, finding['id'], finding['kind'], finding['value'], finding['location'])
             if not plan.findings:
@@ -85,11 +117,30 @@ class ReviewWindow(tk.Toplevel):
                 finding = plans[index].findings.get(identity, {})
                 if finding.get('kind') in DATOS_PERSONALES_AUTOMATICOS or finding.get('kind') == 'ZONA':
                     self.toggle(row, redraw=False)
+            self.clean_metadata.trace_add('write', self.sync_metadata_rows)
+            self.sync_metadata_rows()
         self.update_counter()
         notebook = ttk.Notebook(frame)
         notebook.pack(fill='both', expand=True, pady=8)
         text_frame, image_frame = ttk.Frame(notebook), ttk.Frame(notebook)
         notebook.add(text_frame, text='Contexto y texto reconocido')
+        if not self.restoring:
+            metadata_tab = ttk.Frame(notebook)
+            notebook.add(metadata_tab, text='✓ Metadatos')
+            ttk.Checkbutton(metadata_tab, text='Anonimizar metadatos', variable=self.clean_metadata).pack(anchor='w', padx=8, pady=8)
+            ttk.Label(metadata_tab, text='La recuperación conserva el original íntegro.',
+                      wraplength=950).pack(anchor='w', padx=8, pady=8)
+            metadata_text = tk.Text(metadata_tab, wrap='word', font=('Segoe UI', 10))
+            metadata_scroll = ttk.Scrollbar(metadata_tab, orient='vertical', command=metadata_text.yview)
+            metadata_text.configure(yscrollcommand=metadata_scroll.set)
+            metadata_scroll.pack(side='right', fill='y')
+            metadata_text.pack(fill='both', expand=True)
+            for plan in plans:
+                metadata_text.insert('end', f'{plan.path.name}\n')
+                for location, key, value in (getattr(plan, 'metadata', None) or []):
+                    metadata_text.insert('end', f'  {location} / {key}: {value}\n')
+                metadata_text.insert('end', '\n')
+            metadata_text.configure(state='disabled')
         self.approve_button = ttk.Button(notebook, text='Generar anonimizado',
                                          command=self.approve, style='Principal.TButton')
         self.approve_button.place(relx=1, x=-4, y=1, anchor='ne')
@@ -130,11 +181,27 @@ class ReviewWindow(tk.Toplevel):
         row = self.table.insert('', 'end', values=('☐', kind, value, self.plans[plan_index].path.name + ' / ' + location))
         self.rows[row] = (plan_index, finding_id)
         self.row_locations[row] = location
+        if kind == 'METADATO':
+            self.metadata_rows.add(row)
+
+    def sync_metadata_rows(self, *_):
+        selected = self.clean_metadata.get()
+        for row in self.metadata_rows:
+            if selected:
+                self.chosen.add(row)
+            else:
+                self.chosen.discard(row)
+            self.table.set(row, 'allow', '☑' if selected else '☐')
+            self.table.item(row, tags=('metadato',))
+        self.update_counter()
 
     def update_counter(self):
         self.counter.set(f'{len(self.chosen)} de {len(self.rows)} propuestas autorizadas')
 
     def toggle(self, row, redraw=True):
+        if row in self.metadata_rows:
+            self.clean_metadata.set(not self.clean_metadata.get())
+            return
         if row in self.chosen:
             self.chosen.remove(row)
         else:
@@ -156,7 +223,11 @@ class ReviewWindow(tk.Toplevel):
         return 'break'
 
     def mark_all(self, selected):
+        if not self.restoring:
+            self.clean_metadata.set(selected)
         for row in self.rows:
+            if row in self.metadata_rows:
+                continue
             if (row in self.chosen) != selected:
                 self.toggle(row, redraw=False)
         self.draw_image()
@@ -167,6 +238,14 @@ class ReviewWindow(tk.Toplevel):
             return
         index, finding_id = self.rows[selection[0]]
         plan = self.plans[index]
+        if selection[0] in self.metadata_rows:
+            self.current = (None, None)
+            self.context.configure(state='normal')
+            self.context.delete('1.0', 'end')
+            self.context.insert('end', 'Metadatos encontrados en el original. La casilla de esta fila controla la limpieza de los metadatos del archivo. Consulte la pestaña Metadatos para ver la lista completa.')
+            self.context.configure(state='disabled')
+            self.draw_image()
+            return
         finding = plan.findings.get(finding_id)
         evidence = plan.evidence.get(finding['location']) if finding else None
         if not finding:
@@ -311,17 +390,23 @@ class ReviewWindow(tk.Toplevel):
         self.show_selected()
 
     def approve(self):
-        if not self.chosen:
+        if not self.chosen and (self.restoring or not self.clean_metadata.get()):
             messagebox.showinfo('Sin autorización', 'Marque las propuestas que desea autorizar.', parent=self)
             return
         approved = {}
         for row in self.chosen:
             index, finding_id = self.rows[row]
             approved.setdefault(index, set())
-            if finding_id:
+            if finding_id and not str(finding_id).startswith('__METADATA__:'):
                 approved[index].add(finding_id)
         self.grab_release()
         self.destroy()
+        if not self.restoring and self.clean_metadata.get():
+            for index in range(len(self.plans)):
+                approved.setdefault(index, set())
+        elif not self.restoring:
+            for index in approved:
+                approved[index].add('__KEEP_METADATA__')
         self.on_approve([(self.plans[index], ids) for index, ids in sorted(approved.items())])
 
     def cancel(self):

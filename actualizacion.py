@@ -1,4 +1,4 @@
-"""Descarga e instala la versión publicada del Anonimizador."""
+"""Descarga e instala la versiÃ³n publicada del Anonimizador."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 
-ARCHIVE_URL = "https://github.com/Telecampux/ANONIMIZADOR/archive/refs/heads/main.zip"
+ARCHIVE_URL = "https://github.com/Telecampux/EnigmaLex/archive/refs/heads/main.zip"
 MANIFEST = "Actualizador/archivos_programa.json"
 PROTECTED = {".git", ".venv", "salida", "tessdata", "tmp", "capturas", "casos"}
 
@@ -20,7 +20,7 @@ def _safe_path(raw: str) -> Path:
     if (not raw or path.is_absolute() or "\\" in raw or ":" in raw
             or any(part in ("", ".", "..") for part in path.parts)
             or path.parts[0].lower() in PROTECTED):
-        raise ValueError(f"Ruta inválida en el paquete: {raw}")
+        raise ValueError(f"Ruta invÃ¡lida en el paquete: {raw}")
     return Path(*path.parts)
 
 
@@ -29,16 +29,16 @@ def _stage(archive: Path, staging: Path) -> list[Path]:
         names = bundle.namelist()
         roots = {name.split("/", 1)[0] for name in names if "/" in name}
         if len(roots) != 1:
-            raise ValueError("El paquete de GitHub no tiene una raíz única.")
+            raise ValueError("El paquete de GitHub no tiene una raÃ­z Ãºnica.")
         root = roots.pop()
         entries = json.loads(bundle.read(f"{root}/{MANIFEST}"))["archivos"]
         if not isinstance(entries, list) or not entries or len(entries) != len(set(entries)):
-            raise ValueError("El listado de archivos del paquete es inválido.")
+            raise ValueError("El listado de archivos del paquete es invÃ¡lido.")
         paths = [_safe_path(item) for item in entries]
         for relative in paths:
             info = bundle.getinfo(f"{root}/{relative.as_posix()}")
             if info.is_dir() or info.file_size > 100_000_000:
-                raise ValueError(f"Archivo inválido: {relative}")
+                raise ValueError(f"Archivo invÃ¡lido: {relative}")
             target = staging / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             with bundle.open(info) as source, target.open("wb") as output:
@@ -66,13 +66,13 @@ def update_direct(destination: Path, confirm=None) -> bool:
         with zipfile.ZipFile(archive) as bundle:
             roots = {name.split("/", 1)[0] for name in bundle.namelist() if "/" in name}
             if len(roots) != 1:
-                raise ValueError("El paquete de GitHub no tiene una raíz única.")
+                raise ValueError("El paquete de GitHub no tiene una raÃ­z Ãºnica.")
             try:
                 available = bundle.read(f"{roots.pop()}/VERSION").decode("utf-8").strip()
             except KeyError as error:
-                raise ValueError("La versión de GitHub no está identificada.") from error
+                raise ValueError("La versiÃ³n de GitHub no estÃ¡ identificada.") from error
         if not available:
-            raise ValueError("La versión de GitHub está vacía.")
+            raise ValueError("La versiÃ³n de GitHub estÃ¡ vacÃ­a.")
         if confirm is not None and not confirm(installed_version(destination), available):
             return False
         paths = _stage(archive, work / "nuevo")

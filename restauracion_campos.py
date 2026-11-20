@@ -73,7 +73,7 @@ def _restore_pdf(data, replacer):
     import pymupdf
     with pymupdf.open(stream=data, filetype='pdf') as doc:
         if doc.needs_pass:
-            raise AnonymizationError('El fallo PDF está protegido. Use una copia sin contraseña o Word (.docx).')
+            raise AnonymizationError('La providencia PDF está protegida. Exporte una copia PDF sin contraseña y vuelva a intentarlo.')
         for page in doc:
             with replacer.at(f'Página {page.number+1}'):
                 # Character boxes keep punctuation and neighbouring text outside
@@ -107,18 +107,18 @@ def _restore_pdf(data, replacer):
                     for box in boxes[1:]:
                         rect |= box
                     if '\n' in value or '\r' in value:
-                        raise AnonymizationError('Un campo contiene varios renglones. Restaure este fallo en Word (.docx).')
+                        raise AnonymizationError('Un dato ocupa varios renglones. Ajuste el PDF de la providencia y vuelva a intentarlo.')
                     font = pymupdf.Font('helv')
                     if any(ord(character) > 255 for character in value):
-                        raise AnonymizationError('Un campo requiere caracteres especiales. Restaure este fallo en Word (.docx).')
+                        raise AnonymizationError('Un dato contiene caracteres que no se pueden insertar en este PDF. Ajuste el PDF de la providencia y vuelva a intentarlo.')
                     size = min(rect.height / 1.5, rect.width / max(font.text_length(value, fontsize=1), 0.1))
                     if size < 6:
-                        raise AnonymizationError('Un dato original no cabe con letra legible en el código del PDF. Use el fallo Word (.docx).')
+                        raise AnonymizationError('Un dato original no cabe de forma legible. Amplíe el espacio del código en el PDF y vuelva a intentarlo.')
                     replacements.append((rect, value, size))
                 if replacer.reviewing:
                     continue
                 if replacements and any(annot.type[0] == 12 for annot in page.annots() or []):
-                    raise AnonymizationError('El fallo PDF tiene tachaduras pendientes. Use Word o un PDF sin anotaciones de redacción pendientes.')
+                    raise AnonymizationError('La providencia PDF tiene tachaduras pendientes. Exporte un PDF sin anotaciones de redacción pendientes.')
                 for rect, value, size in replacements:
                     page.add_redact_annot(rect, fill=(1, 1, 1), cross_out=False)
                 if replacements:
@@ -163,6 +163,13 @@ def apply_field_review(plan, approved, output_dir, progress=None):
     restored = _transform(plan.original, plan.path.suffix.lower(), replacer)
     if replacer.count != len(approved):
         raise AnonymizationError('Los campos ya no corresponden a la revisión. Vuelva a analizar el fallo.')
+    if plan.path.suffix.lower() == '.pdf':
+        import pymupdf
+        with pymupdf.open(stream=restored, filetype='pdf') as document:
+            remaining = set(re.findall(r'(?<!\w)(?:ANON_[A-Z_]+_\d{4,}|A[A-F0-9]{7})(?!\w)',
+                                       '\n'.join(page.get_text() for page in document)))
+        if remaining:
+            raise AnonymizationError('El PDF conserva códigos sin restaurar: ' + ', '.join(sorted(remaining)))
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     target = output_dir / f'documento_restaurado_{secrets.token_hex(4)}{plan.path.suffix}'
@@ -172,6 +179,8 @@ def apply_field_review(plan, approved, output_dir, progress=None):
 
 def restore_judgment(path, recovery, output_dir, progress=None):
     """Restore every existing code in the judgment, without manual selection."""
+    if Path(path).suffix.lower() != '.pdf':
+        raise AnonymizationError('La providencia debe ser un PDF con texto seleccionable y códigos intactos.')
     plan = analyze_field_restoration(path, recovery, progress)
     codes = set(re.findall(r'(?<!\w)(?:ANON_[A-Z_]+_\d{4,}|A[A-F0-9]{7})(?!\w)',
                            '\n'.join(item['text'] for item in plan.evidence.values())))

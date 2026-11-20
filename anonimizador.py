@@ -39,6 +39,10 @@ NON_PERSON_WORDS = frozenset({
     'FEMENINO', 'MASCULINO', 'URGENCIAS', 'HOSPITALIZACIÓN', 'HOSPITALIZACION',
 })
 PATTERNS = {
+    'CORREO': re.compile(
+        r'(?i)(?<![\w@])[A-Z0-9](?:[A-Z0-9._%+-]*[A-Z0-9])?[ \t]*@[ \t]*'
+        r'(?:[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?[ \t]*\.[ \t]*)+'
+        r'[A-Z]{2,}(?![\w@])'),
     'DOCUMENTO': re.compile(r'(?i)\b(?:c[. ]?c[.]?|c[eé]dula(?:\s+de\s+ciudadan[ií]a)?|pasaporte|documento)\s*(?:n[úu]mero|n\s*[º°o.*]|:|#)?\s*([\d][\d. -]{4,18}\d)(?!\w)'),
     'PERSONA': re.compile(r'(?i:\b(?:(?:afiliado|paciente)\s*:\s*(?:CC|C\.C\.?|TI|CE|RC)\s*[.:\-]?\s*\d[\d.]*|nombre(?: completo)?|accionante|accionado|demandante|demandado|paciente|señor|señora|autorizador|ordenado\s+p[oe]r|registr[oe]\s+impreso\s+por))\s*[:;.\-]?\s*(' + PERSON_NAME + r')'),
     'IDENTIFICACION': re.compile(r'(?i)(?<!\w)(?:CC|TI|RC|CE|NUIP|identificaci[oó]n)\s*[:.\-]?\s*(\d[\d. -]{4,18}\d)(?!\w)'),
@@ -79,6 +83,7 @@ class Replacer:
         self.learning = learning
         self.known_entities = known_entities or {}
         self.discovered_entities = {'PERSONA': set(), 'IDENTIFICACION': set()}
+        self.clean_metadata = True
 
     @contextmanager
     def at(self, location):
@@ -111,8 +116,10 @@ class Replacer:
                     group = 1 if pattern.groups else 0
                     if kind in PERSON_KINDS and NON_PERSON_WORDS.intersection(m.group(group).upper().split()):
                         continue
-                    category = 'PERSONA' if kind in PERSON_KINDS else 'IDENTIFICACION'
-                    self.discovered_entities[category].add(m.group(group))
+                    if kind in PERSON_KINDS:
+                        self.discovered_entities['PERSONA'].add(m.group(group))
+                    elif kind != 'CORREO':
+                        self.discovered_entities['IDENTIFICACION'].add(m.group(group))
                     candidates.append((m.start(group), m.end(group), kind, m.group(group)))
             candidates.extend(known_entity_spans(text, self.known_entities))
         end = -1
@@ -230,6 +237,10 @@ def _image(data, suffix, replacer, *, embedded=False):
         output = io.BytesIO()
         try:
             options = {'save_all': True, 'append_images': frames[1:]} if len(frames) > 1 and fmt in {'GIF', 'TIFF', 'WEBP'} else {}
+            if not replacer.clean_metadata:
+                for key in ('exif', 'icc_profile', 'dpi', 'comment', 'transparency'):
+                    if key in source.info:
+                        options[key] = source.info[key]
             frames[0].save(output, format=fmt, **options)
         except (KeyError, ValueError, OSError):
             return _covered_pdf(replacer, 'La imagen no tiene un codificador de salida disponible.')
@@ -243,6 +254,8 @@ def _archive(data, replacer, depth):
     with zipfile.ZipFile(io.BytesIO(data)) as source, zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as target:
         if sum(i.file_size for i in source.infolist()) > MAX_BYTES * 3:
             return _covered_pdf(replacer, 'El contenido descomprimido supera 300 MB.')
+        if not replacer.clean_metadata:
+            target.comment = source.comment
         for index, info in enumerate(source.infolist()):
             if info.is_dir():
                 continue
@@ -258,7 +271,13 @@ def _archive(data, replacer, depth):
                     payload = transform(payload, Path(info.filename).suffix, replacer, depth + 1)
             suffix = replacer.output_suffix or Path(info.filename).suffix
             # Flat, anonymous names prevent identifiers leaking through internal paths.
-            target.writestr(f'archivo_{index+1:04d}{suffix}', payload)
+            entry_name = f'archivo_{index+1:04d}{suffix}'
+            if replacer.clean_metadata:
+                target.writestr(entry_name, payload)
+            else:
+                retained = copy.copy(info)
+                retained.filename = entry_name
+                target.writestr(retained, payload)
             replacer.output_suffix = None
     _notice(replacer, 'Contenedor ZIP procesado: entradas renombradas y carpetas aplanadas.')
     return output.getvalue()
@@ -299,7 +318,9 @@ def _office(data, suffix, replacer):
                             return _covered_pdf(replacer, 'Una imagen incrustada no pudo interpretarse.')
                         if replacer.output_suffix:
                             return _covered_pdf(replacer, 'Una imagen incrustada necesita conversión.')
-                    elif name.startswith('docProps/') or name in {'meta.xml', 'Thumbnails/thumbnail.png'}:
+                    elif not replacer.clean_metadata and (name.startswith('docProps/') or name in {'meta.xml', 'Thumbnails/thumbnail.png'}):
+                        pass
+                    elif replacer.clean_metadata and (name.startswith('docProps/') or name in {'meta.xml', 'Thumbnails/thumbnail.png'}):
                         # Keep valid XML parts, removing metadata values.
                         if name.endswith('.xml'):
                             root = ET.fromstring(payload)
@@ -332,7 +353,13 @@ def _office(data, suffix, replacer):
                                     if formula is not None:
                                         cell.remove(formula)
                         payload = ET.tostring(root, encoding='utf-8', xml_declaration=True)
-                    target.writestr(info, payload)
+                    # Never carry ZIP entry dates, comments or platform attributes
+                    # from the source document into the shareable Office copy.
+                    clean_info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0)) if replacer.clean_metadata else copy.copy(info)
+                    clean_info.compress_type = zipfile.ZIP_DEFLATED
+                    target.writestr(clean_info, payload)
+            if not replacer.clean_metadata:
+                target.comment = source.comment
         return out.getvalue()
 
 
@@ -497,7 +524,14 @@ def _pdf(data, replacer):
                 for area, token in labels:
                     pdf_label(page, area, token)
                 clean.insert_pdf(doc, from_page=page.number, to_page=page.number, links=False, annots=False, widgets=False)
-        return b'' if replacer.learning or replacer.reviewing else clean.tobytes(garbage=4, deflate=True)
+        if replacer.learning or replacer.reviewing:
+            return b''
+        if not replacer.clean_metadata:
+            clean.set_metadata(doc.metadata)
+            xmp = doc.get_xml_metadata()
+            if xmp:
+                clean.set_xml_metadata(xmp)
+        return clean.tobytes(garbage=4, deflate=True)
 
 
 def transform(data, suffix, replacer, depth=0):
@@ -621,6 +655,7 @@ class ReviewPlan:
     restoration_fields: dict | None = None
     case_id: str | None = None
     known_entities: dict | None = None
+    metadata: list | None = None
 
 
 def analyze(path, manual=(), automatic=True, progress=None):
@@ -631,6 +666,12 @@ def analyze(path, manual=(), automatic=True, progress=None):
     if path.stat().st_size > MAX_BYTES:
         raise AnonymizationError('El límite por archivo es 100 MB.')
     data = path.read_bytes()
+    from metadatos import inspect_metadata
+    try:
+        metadata = inspect_metadata(data, path.suffix)
+    except Exception:
+        metadata = [('Archivo', 'lectura de metadatos', 'No se pudieron enumerar; revise el archivo original.')]
+    metadata.insert(0, ('Archivo', 'nombre original', path.name))
     cache, known_entities = {}, {}
     if automatic and data.startswith(b'%PDF-'):
         learner = Replacer(manual, automatic=True, progress=progress, ocr_cache=cache, learning=True)
@@ -651,7 +692,7 @@ def analyze(path, manual=(), automatic=True, progress=None):
     return ReviewPlan(path, data, tuple(manual), automatic, replacer.findings,
                       replacer.evidence, replacer.warnings, replacer.ocr_pages,
                       replacer.ocr_cache, replacer.output_suffix or path.suffix, case_id=replacer.case_id,
-                      known_entities=known_entities)
+                      known_entities=known_entities, metadata=metadata)
 
 
 def _propose_signature_blocks(replacer):
@@ -751,12 +792,15 @@ def apply_review(plan, approved, output_dir, progress=None):
         from restauracion_campos import apply_field_review
         return apply_field_review(plan, approved, output_dir, progress)
     approved = set(approved)
+    clean_metadata = '__KEEP_METADATA__' not in approved
+    approved.discard('__KEEP_METADATA__')
     if not approved.issubset(plan.findings):
         raise AnonymizationError('La selección no corresponde al análisis revisado.')
     if plan.path.read_bytes() != plan.original:
         raise AnonymizationError('El original cambió después del análisis. Vuelva a analizarlo antes de autorizar.')
     replacer = Replacer(plan.manual, plan.automatic, approved=approved, progress=progress,
                         ocr_cache=plan.ocr_cache, case_id=plan.case_id, known_entities=plan.known_entities)
+    replacer.clean_metadata = clean_metadata
     for finding_id in sorted(approved):
         finding = plan.findings[finding_id]
         if finding.get('kind') == 'ZONA':

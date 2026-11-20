@@ -1,10 +1,12 @@
 """Interfaz local en español; los documentos nunca se suben a internet."""
 import os
+import json
 from pathlib import Path
 import queue
 import re
 import shutil
 import threading
+import tempfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -17,8 +19,45 @@ from procesamiento import ProcessingCancelled, cancellation_scope, check_cancell
 from actualizacion import installed_version, update_direct
 
 
-ORIGINALS_FOLDER = Path(r'C:\TUTELAS\ORIGINALES')
-RESTORATION_FOLDER = Path(r'C:\TUTELAS\ANONIMIZADOS')
+BASE_FOLDER = Path(__file__).resolve().parent.parent
+ORIGINALS_FOLDER = BASE_FOLDER / 'ORIGINALES'
+RESTORATION_FOLDER = BASE_FOLDER / 'ANONIMIZADOS'
+PROVIDENCIAS_FOLDER = BASE_FOLDER / 'PROVIDENCIAS'
+PROVIDENCIAS_RESTAURADAS_FOLDER = PROVIDENCIAS_FOLDER / 'RESTAURADAS'
+SETTINGS_FILE = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'Anonimizador' / 'carpetas.json'
+
+
+def cargar_carpetas():
+    defaults = {'originales': ORIGINALS_FOLDER, 'anonimizados': RESTORATION_FOLDER,
+                'providencias': PROVIDENCIAS_FOLDER}
+    try:
+        saved = json.loads(SETTINGS_FILE.read_text(encoding='utf-8'))
+        if not isinstance(saved, dict):
+            return defaults
+        return {key: Path(saved[key]).expanduser().resolve() if isinstance(saved.get(key), str)
+                and saved[key].strip() else value for key, value in defaults.items()}
+    except (OSError, ValueError, TypeError):
+        return defaults
+
+
+def validar_carpetas(folders):
+    for key, path in folders.items():
+        if not path.is_dir():
+            raise ValueError(f'La carpeta de {key} no existe o no está conectada: {path}')
+        if key != 'originales':
+            try:
+                with tempfile.TemporaryFile(dir=path):
+                    pass
+            except OSError as error:
+                raise ValueError(f'No se puede escribir en la carpeta de {key}: {path}') from error
+
+
+def guardar_carpetas(folders):
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary = SETTINGS_FILE.with_suffix('.tmp')
+    temporary.write_text(json.dumps({key: str(value) for key, value in folders.items()},
+                                    ensure_ascii=False, indent=2), encoding='utf-8')
+    temporary.replace(SETTINGS_FILE)
 
 
 class App(tk.Tk):
@@ -40,8 +79,9 @@ class App(tk.Tk):
         self.progress_page = None
         self.active_filename = ''
         self.restored_file = ''
+        self.folders = cargar_carpetas()
         self.selected_restored = tk.StringVar()
-        self.output = tk.StringVar(value=str(Path(__file__).resolve().parent.parent / 'ANONIMIZADOS'))
+        self.output = tk.StringVar(value=str(self.folders['anonimizados']))
         self.auto = tk.BooleanVar(value=True)
         self.mode = tk.StringVar(value='anonimizar')
         self.restore_kind = tk.StringVar(value='original')
@@ -51,9 +91,10 @@ class App(tk.Tk):
         self.recovery_name = tk.StringVar(value='Ninguna tabla cargada')
         self.anonymized_source = tk.StringVar(value='Insumo anonimizado asociado: sin cargar')
         self.status = tk.StringVar(value='Seleccione archivos, analice las propuestas y autorice cuáles aplicar.')
-        frame = ttk.Frame(self, padding=22)
+        compact = self.winfo_screenheight() < 800
+        frame = ttk.Frame(self, padding=12 if compact else 22)
         frame.pack(fill='both', expand=True)
-        ttk.Label(frame, text='Anonimizador reversible', font=('Segoe UI', 22, 'bold')).pack(anchor='w')
+        ttk.Label(frame, text='EnigmaLex - Anonimizador reversible', font=('Segoe UI', 22, 'bold')).pack(anchor='w')
         ttk.Label(frame, text=f'Versión instalada: {installed_version(Path(__file__).resolve().parent)}').pack(anchor='w')
         ttk.Label(frame, text='OCR local en español e inglés · Originales intactos · Restauración de archivos anonimizados').pack(anchor='w', pady=(3, 15))
         modes = ttk.Frame(frame)
@@ -61,6 +102,7 @@ class App(tk.Tk):
         for value, label in [('anonimizar', 'Anonimizar archivos'), ('fallo', 'Restaurar archivos anonimizados')]:
             ttk.Radiobutton(modes, text=label, variable=self.mode, value=value).pack(side='left', padx=(0, 24))
         ttk.Button(modes, text='Instalar nueva versión', command=self.install_new_version).pack(side='right')
+        ttk.Button(modes, text='Configurar carpetas…', command=self.configurar_carpetas).pack(side='right', padx=8)
         document_area = ttk.Frame(frame)
         document_area.pack(fill='x')
         self.input_frame = ttk.Frame(document_area)
@@ -69,7 +111,7 @@ class App(tk.Tk):
         bar.pack(fill='x', pady=(15, 5))
         ttk.Button(bar, text='Seleccionar archivos…', command=self.choose).pack(side='left')
         ttk.Button(bar, text='Limpiar selección', command=self.clear).pack(side='left', padx=8)
-        self.listing = tk.Listbox(self.input_frame, height=5)
+        self.listing = tk.Listbox(self.input_frame, height=2 if compact else 5)
         self.listing.pack(fill='x')
         self.judgment_frame = ttk.LabelFrame(document_area, text='Restaurar archivos anonimizados', padding=10)
         self.local_restore_notice = ttk.Label(
@@ -113,11 +155,15 @@ class App(tk.Tk):
         self.recovery_fields.pack(fill='x', expand=True)
         self.manual_frame = ttk.Frame(frame)
         self.manual_frame.pack(fill='x')
-        ttk.Label(self.manual_frame, text='Nombres de personas o identificaciones adicionales: uno por línea.').pack(anchor='w', pady=(14, 4))
-        self.manual = tk.Text(self.manual_frame, height=5, wrap='word', font=('Segoe UI', 10))
+        ttk.Label(self.manual_frame, text='Otros datos o variables que desea anonimizar (uno por línea):').pack(anchor='w', pady=(14, 4))
+        self.manual = tk.Text(self.manual_frame, height=2 if compact else 5, wrap='word', font=('Segoe UI', 10))
         self.manual.pack(fill='x')
-        ttk.Checkbutton(self.manual_frame, text='Detectar solo nombres propios de personas e identificaciones',
+        ttk.Label(self.manual_frame, text='Metadatos, Nombres, Identificaciones y correos electrónicos',
+                  font=('Segoe UI', 11, 'bold')).pack(anchor='w', pady=(8, 2))
+        ttk.Checkbutton(self.manual_frame, text='Detectar automáticamente metadatos, nombres, identificaciones y correos electrónicos',
                         variable=self.auto, command=self.actualizar_aviso_deteccion).pack(anchor='w', pady=6)
+        ttk.Label(self.manual_frame, text='Metadatos: puede seleccionar su limpieza en la ventana de revisión (autor, fechas internas y datos de cámara).',
+                  wraplength=790).pack(anchor='w')
         self.aviso_deteccion = tk.StringVar()
         ttk.Label(self.manual_frame, textvariable=self.aviso_deteccion, foreground='#9a3412',
                   wraplength=790).pack(anchor='w')
@@ -126,9 +172,8 @@ class App(tk.Tk):
         grid = self.output_grid = ttk.Frame(frame)
         grid.pack(fill='x', pady=8)
         grid.columnconfigure(1, weight=1)
-        ttk.Label(grid, text='Carpeta de salida').grid(row=0, column=0, sticky='w', padx=(0, 12), pady=4)
-        ttk.Entry(grid, textvariable=self.output).grid(row=0, column=1, sticky='ew', pady=4)
-        ttk.Button(grid, text='Elegir…', command=self.choose_output).grid(row=0, column=2, padx=(8, 0))
+        ttk.Label(grid, text='Carpeta de anonimizados').grid(row=0, column=0, sticky='w', padx=(0, 12), pady=4)
+        ttk.Label(grid, textvariable=self.output).grid(row=0, column=1, sticky='w', pady=4)
         self.mode_hint = tk.StringVar()
         ttk.Label(frame, textvariable=self.mode_hint, wraplength=790, foreground='#794500').pack(anchor='w', pady=8)
         actions = ttk.Frame(frame)
@@ -153,7 +198,7 @@ class App(tk.Tk):
         self.download_result_button = ttk.Button(result_actions, text='Guardar copia revisada…', command=self.download_restored, state='disabled')
         self.download_result_button.pack(side='left')
         self.selected_restored.trace_add('write', self.update_result_controls)
-        self.log = tk.Text(frame, height=6, state='disabled', wrap='word')
+        self.log = tk.Text(frame, height=3 if compact else 6, state='disabled', wrap='word')
         self.log.tag_configure('pagina', font=('Segoe UI', 11, 'bold'))
         self.log.pack(fill='both', expand=True)
         self.mode.trace_add('write', self.update_mode)
@@ -165,9 +210,9 @@ class App(tk.Tk):
         if self.auto.get():
             self.aviso_deteccion.set('')
         elif self.manual.get('1.0', 'end').strip():
-            self.aviso_deteccion.set('Al desactivar esta opción, no se anonimizan nombres ni identificaciones automáticamente. Solo se anonimizan los datos que haya incluido manualmente en el campo de arriba.')
+            self.aviso_deteccion.set('Al desactivar esta opción, los metadatos y los demás datos no quedan marcados automáticamente. Puede seleccionar metadatos en la revisión y se aplicarán los datos que haya incluido manualmente arriba.')
         else:
-            self.aviso_deteccion.set('Al desactivar esta opción, no se anonimizan nombres ni identificaciones automáticamente. Solo se anonimizan los datos que incluya manualmente en el campo de arriba. Si lo deja en blanco, no se anonimiza nada.')
+            self.aviso_deteccion.set('Al desactivar esta opción, los metadatos y los demás datos no quedan marcados automáticamente. Puede seleccionar metadatos en la revisión o incluir datos manualmente arriba.')
 
     def update_result_controls(self, *_):
         selected = self.selected_restored.get()
@@ -202,6 +247,7 @@ class App(tk.Tk):
         if self.busy:
             return
         destination = filedialog.asksaveasfilename(title='Guardar copia revisada',
+            initialdir=str(self.folders['providencias'] / 'RESTAURADAS' if self.restore_kind.get() != 'original' else self.folders['anonimizados']),
             initialfile=path.name, defaultextension=path.suffix,
             filetypes=[('Mismo formato del documento', '*' + path.suffix)])
         if destination:
@@ -285,7 +331,7 @@ class App(tk.Tk):
         if key != self.progress_page:
             self.log.insert('end', ('\n' if self.progress_page else '') + title + '\n', 'pagina')
             self.progress_page = key
-        label = 'Identificación' if kind in {'DOCUMENTO', 'IDENTIFICACION'} else 'Nombre' if kind in {'PERSONA', 'NOMBRE_FORMULARIO', 'PROFESIONAL'} else 'Nombre o identificación'
+        label = 'Identificación' if kind in {'DOCUMENTO', 'IDENTIFICACION'} else 'Nombre' if kind in {'PERSONA', 'NOMBRE_FORMULARIO', 'PROFESIONAL'} else 'Correo electrónico' if kind == 'CORREO' else 'Dato'
         self.log.insert('end', f"{label}: {' '.join(value.split())}\n")
         self.log.see('end')
         self.log.config(state='disabled')
@@ -313,7 +359,7 @@ class App(tk.Tk):
             self.manual_frame.pack(fill='x')
             self.output_grid.pack(fill='x', pady=8, after=self.manual_frame)
             self.run_button.config(text='Anonimizar', state='normal')
-            self.mode_hint.set('La copia .restauracion contiene los datos originales sin cifrar. Comparta solo el archivo anonimizado.')
+            self.mode_hint.set('')
 
     def update_restoration_kind(self, clear=True):
         if clear:
@@ -326,7 +372,7 @@ class App(tk.Tk):
         self.run_button.config(text=label,
                                state='normal' if self.judgment.get() and self.recovery.get() else 'disabled')
         self.mode_hint.set('Seleccione el archivo anonimizado y su recuperación. Todo se procesa en este equipo.' if original else
-                           'Descargue el documento elaborado por el sustanciador y selecciónelo. Los datos originales se restauran solo en este equipo.')
+                           'Seleccione la providencia PDF con texto seleccionable y sus códigos intactos. Se restaurará localmente en PROVIDENCIAS\\RESTAURADAS.')
 
     def choose(self):
         if self.busy:
@@ -334,7 +380,10 @@ class App(tk.Tk):
         if self.mode.get() == 'fallo':
             self.load_downloaded_judgment()
             return
-        files = filedialog.askopenfilenames(title='Seleccione los archivos originales para anonimizar', initialdir=str(ORIGINALS_FOLDER))
+        if not self.folders['originales'].is_dir():
+            messagebox.showerror('Carpeta de originales', 'La carpeta configurada no existe o no está conectada. Abra Configurar carpetas.')
+            return
+        files = filedialog.askopenfilenames(title='Seleccione los archivos originales para anonimizar', initialdir=str(self.folders['originales']))
         for file in files:
             if file not in self.files:
                 self.files.append(file)
@@ -344,16 +393,17 @@ class App(tk.Tk):
         """Selecciona el archivo de una de las dos formas de restauración."""
         if self.busy:
             return
-        downloads = Path.home() / 'Downloads'
         original = self.restore_kind.get() == 'original'
         path = filedialog.askopenfilename(
             title='Seleccione el archivo anonimizado original' if original else
                   'Seleccione el documento anonimizado elaborado por el sustanciador',
-            initialdir=str(downloads if downloads.is_dir() else Path.home()),
+            initialdir=str(self.folders['anonimizados'] if original else self.folders['providencias']),
             filetypes=[('Todos los archivos', '*')] if original else
-                      [('Documentos con códigos de texto', ('*.docx', '*.pdf', '*.txt', '*.md', '*.log', '*.rst')),
-                       ('Todos los archivos', '*')])
+                      [('PDF con texto seleccionable', '*.pdf')])
         if not path:
+            return
+        if not original and Path(path).suffix.lower() != '.pdf':
+            messagebox.showerror('Providencia', 'Seleccione una providencia PDF con texto seleccionable.')
             return
         self.selected_restored.set('')
         self.judgment.set(path)
@@ -369,7 +419,7 @@ class App(tk.Tk):
         document = Path(path)
         self.reset_recovery()
         candidates = [Path(str(document) + '.restauracion')]
-        for folder in (RESTORATION_FOLDER, Path(__file__).resolve().parent / 'salida'):
+        for folder in (self.folders['anonimizados'], Path(__file__).resolve().parent / 'salida'):
             candidate = folder / (document.name + '.restauracion')
             if candidate not in candidates:
                 candidates.append(candidate)
@@ -399,7 +449,7 @@ class App(tk.Tk):
         if not self.judgment.get():
             return
         path = filedialog.askopenfilename(title='Cargue la tabla .restauracion o el insumo anonimizado que la acompaña',
-            initialdir=str(Path(self.judgment.get()).parent),
+            initialdir=str(self.folders['anonimizados'] if self.restore_kind.get() != 'original' else Path(self.judgment.get()).parent),
             filetypes=[('Todos los archivos del caso', '*'),
                        ('Tabla de correspondencias', '*.restauracion'),
                        ('Tabla e insumos anonimizados', ('*.restauracion', '*.pdf', '*.docx', '*.txt', '*.md', '*.log', '*.rst'))])
@@ -427,13 +477,48 @@ class App(tk.Tk):
         self.recovery_info.set(f"Insumo de origen: {body['name']} · {len(body['fields'])} campos guardados.")
         self.status.set('Archivo listo para restaurar.')
 
-    def choose_output(self):
-        value = filedialog.askdirectory()
-        if value:
-            self.output.set(value)
+    def configurar_carpetas(self):
+        if self.busy:
+            messagebox.showinfo('Carpetas', 'Espere a que termine el proceso actual.')
+            return
+        dialog = tk.Toplevel(self)
+        dialog.title('Configurar carpetas locales')
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        panel = ttk.Frame(dialog, padding=16)
+        panel.pack(fill='both', expand=True)
+        panel.columnconfigure(1, weight=1)
+        labels = {'originales': 'Archivos originales', 'anonimizados': 'Archivos anonimizados',
+                  'providencias': 'Proyectos y providencias restauradas'}
+        values = {key: tk.StringVar(value=str(path)) for key, path in self.folders.items()}
+        for row, (key, label) in enumerate(labels.items()):
+            ttk.Label(panel, text=label).grid(row=row, column=0, sticky='w', padx=(0, 10), pady=5)
+            ttk.Entry(panel, textvariable=values[key], width=65).grid(row=row, column=1, sticky='ew', pady=5)
+            def browse(kind=key):
+                selected = filedialog.askdirectory(parent=dialog, initialdir=values[kind].get() or str(BASE_FOLDER))
+                if selected:
+                    values[kind].set(selected)
+            ttk.Button(panel, text='Elegir…', command=browse).grid(row=row, column=2, padx=(8, 0), pady=5)
+        def save():
+            folders = {key: Path(value.get().strip()).expanduser().resolve()
+                       for key, value in values.items() if value.get().strip()}
+            if len(folders) != len(values):
+                messagebox.showerror('Carpetas', 'Seleccione las tres carpetas.', parent=dialog)
+                return
+            try:
+                validar_carpetas(folders)
+                guardar_carpetas(folders)
+            except (OSError, ValueError) as error:
+                messagebox.showerror('Carpetas', str(error), parent=dialog)
+                return
+            self.folders = folders
+            self.output.set(str(folders['anonimizados']))
+            dialog.destroy()
+        ttk.Button(panel, text='Guardar', command=save).grid(row=3, column=2, sticky='e', pady=(12, 0))
 
     def open_output(self):
-        path = RESTORATION_FOLDER if self.mode.get() == 'fallo' else Path(self.output.get())
+        path = self.folders['anonimizados']
         if path.is_dir():
             os.startfile(path)
         else:
@@ -443,6 +528,11 @@ class App(tk.Tk):
         if self.busy:
             return
         mode = self.mode.get()
+        try:
+            validar_carpetas(self.folders)
+        except ValueError as error:
+            messagebox.showerror('Carpetas', str(error))
+            return
         files = [self.judgment.get()] if mode == 'fallo' and self.judgment.get() else ([] if mode == 'fallo' else list(self.files))
         if not files:
             messagebox.showerror('Falta el documento' if mode == 'fallo' else 'Falta selección',
@@ -452,12 +542,9 @@ class App(tk.Tk):
             self.detect_recovery(self.judgment.get())
             if self.recovery.get():
                 return self.run()
-            messagebox.showerror('No se encontró la recuperación', 'No se encontró el archivo .restauracion asociado. Debe conservarse junto al archivo anonimizado o en C:\\TUTELAS\\ANONIMIZADOS.')
+            messagebox.showerror('No se encontró la recuperación', f'No se encontró el archivo .restauracion asociado. Debe conservarse junto al archivo anonimizado o en {self.folders["anonimizados"]}.')
             return
-        if mode != 'fallo' and not self.output.get().strip():
-            messagebox.showerror('Carpeta', 'Seleccione una carpeta de salida.')
-            return
-        output = str(RESTORATION_FOLDER) if mode == 'fallo' else self.output.get()
+        output = str(self.folders['providencias'] / 'RESTAURADAS' if mode == 'fallo' and self.restore_kind.get() != 'original' else self.folders['anonimizados'])
         manual, automatic = self.manual.get('1.0', 'end').splitlines(), self.auto.get()
         self.busy = True
         self.restored_file = ''
@@ -548,7 +635,7 @@ class App(tk.Tk):
             self.events.put(('file', plan.path.name))
             try:
                 result = apply_review(plan, ids, output, self.report_progress)
-                zones = sum(plan.findings[identity]['kind'] == 'ZONA' for identity in ids)
+                zones = sum(plan.findings[identity]['kind'] == 'ZONA' for identity in ids if identity in plan.findings)
                 self.events.put(('log', f'Guardado: {result["output"]}\n'
                                          f'Zonas de firma aplicadas: {zones}'))
                 message = None

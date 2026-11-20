@@ -1,5 +1,10 @@
 @echo off
 cd /d "%~dp0"
+if exist "%~dp0..\.python313\python.exe" (
+  "%~dp0..\.python313\python.exe" app.py
+  if errorlevel 1 goto error
+  exit /b 0
+)
 if not exist .venv\Scripts\python.exe (
   py -m venv .venv
   if errorlevel 1 goto error
