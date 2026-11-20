@@ -1,5 +1,7 @@
 """Interfaz local en español; los documentos nunca se suben a internet."""
 import os
+import sys
+import webbrowser
 import json
 from pathlib import Path
 import queue
@@ -19,7 +21,8 @@ from procesamiento import ProcessingCancelled, cancellation_scope, check_cancell
 from actualizacion import installed_version, update_direct
 
 
-BASE_FOLDER = Path(__file__).resolve().parent.parent
+BASE_FOLDER = (Path.home() / 'Documents' / 'EnigmaLex' if getattr(sys, 'frozen', False)
+               else Path(__file__).resolve().parent.parent)
 ORIGINALS_FOLDER = BASE_FOLDER / 'ORIGINALES'
 RESTORATION_FOLDER = BASE_FOLDER / 'ANONIMIZADOS'
 PROVIDENCIAS_FOLDER = BASE_FOLDER / 'PROVIDENCIAS'
@@ -271,6 +274,10 @@ class App(tk.Tk):
     def install_new_version(self):
         if self.busy:
             messagebox.showinfo('Actualización', 'Espere a que termine el proceso actual.')
+            return
+        if getattr(sys, 'frozen', False):
+            webbrowser.open('https://github.com/Telecampux/EnigmaLex/releases/latest')
+            self.status.set('Descargue el instalador de la versión más reciente desde GitHub.')
             return
         self.status.set('Comprobando si hay una nueva versión…')
         self.update_idletasks()

@@ -4,3 +4,8 @@ salida/
 *.anonvault
 *.restauracion
 tmp/
+build/
+dist/
+instalador-dist/
+*.spec
+tessdata/

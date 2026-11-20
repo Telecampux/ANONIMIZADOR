@@ -1,5 +1,11 @@
 # Anonimizador reversible local
 
+## Instalador de Windows
+
+Descargue `EnigmaLex-Setup-<versión>.exe` desde [Releases](https://github.com/Telecampux/EnigmaLex/releases). El instalador incluye Python, las bibliotecas, Tesseract OCR y los modelos español e inglés. Crea un acceso directo **EnigmaLex** en el menú Inicio y, por defecto, en el escritorio con el icono de la aplicación. Los documentos se guardan por defecto en `Documentos\EnigmaLex`, fuera de la carpeta del programa.
+
+Para compilar una versión nueva en Windows con Python 3.13, Tesseract OCR de UB Mannheim e Inno Setup 6 instalados, ejecute `powershell -ExecutionPolicy Bypass -File .\Instalador\compilar.ps1`.
+
 Las carpetas iniciales están junto al programa: `ORIGINALES`, `ANONIMIZADOS` y `PROVIDENCIAS`. En **Configurar carpetas…** puede elegir otras ubicaciones para este usuario. La elección se guarda localmente en `%LOCALAPPDATA%\Anonimizador\carpetas.json`. La aplicación comprueba que las carpetas estén disponibles y que pueda escribir en las dos de salida antes de procesar.
 
 Aplicación de escritorio en español para Windows, con selección de varios archivos. No sube documentos a servicios externos. Necesita Python 3.11 o posterior e internet únicamente para instalar dependencias.

@@ -16,7 +16,9 @@ class OCRError(RuntimeError):
 
 
 def executable():
-    candidates = [os.environ.get('TESSERACT_CMD'), shutil.which('tesseract'),
+    candidates = [os.environ.get('TESSERACT_CMD'),
+                  str(Path(__file__).resolve().parent / 'Tesseract-OCR/tesseract.exe'),
+                  shutil.which('tesseract'),
                   str(Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'Tesseract-OCR/tesseract.exe'),
                   str(Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs/Tesseract-OCR/tesseract.exe')]
     for candidate in candidates:
